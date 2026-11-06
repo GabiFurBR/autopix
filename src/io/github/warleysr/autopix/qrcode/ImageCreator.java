@@ -2,6 +2,7 @@ package io.github.warleysr.autopix.qrcode;
 
 import java.awt.image.BufferedImage;
 import java.io.UnsupportedEncodingException;
+import java.nio.charset.StandardCharsets;
 
 import org.bukkit.Bukkit;
 import org.bukkit.Material;
@@ -24,71 +25,78 @@ import io.github.warleysr.autopix.inventory.InventoryManager;
 
 public class ImageCreator {
 
-    public static BufferedImage generateQR(String data) 
-    		throws UnsupportedEncodingException, WriterException {
-    	
-    	BitMatrix matrix = new MultiFormatWriter()
-        		.encode(new String(data.getBytes("UTF-8"), "UTF-8"), BarcodeFormat.QR_CODE, 128, 128);
-    	
-    	BufferedImage image = MatrixToImageWriter.toBufferedImage(matrix);
-    	
-    	return image;
+    public static BufferedImage generateQR(String data)
+            throws UnsupportedEncodingException, WriterException {
+        if (data == null || data.isEmpty()) {
+            throw new IllegalArgumentException("Payload QR Code vazio.");
+        }
+        String utf8Data = new String(data.getBytes(StandardCharsets.UTF_8), StandardCharsets.UTF_8);
+        BitMatrix matrix = new MultiFormatWriter()
+                .encode(utf8Data, BarcodeFormat.QR_CODE, 128, 128);
+
+        return MatrixToImageWriter.toBufferedImage(matrix);
     }
 
     @SuppressWarnings("deprecation")
-	public static ItemStack generateMap(final BufferedImage image, Player p, OrderProduct op) {	
-    	
-    	String mapMaterial = Material.getMaterial("FILLED_MAP") != null ? "FILLED_MAP" : "MAP";
-    	
+    public static ItemStack generateMap(final BufferedImage image, Player p, OrderProduct op) {
+        String mapMaterial = Material.getMaterial("FILLED_MAP") != null ? "FILLED_MAP" : "MAP";
+
         ItemStack itemStack = new ItemStack(Material.getMaterial(mapMaterial));
         MapMeta mapMeta = (MapMeta) itemStack.getItemMeta();
         MapView mapView = Bukkit.createMap(p.getWorld());
         mapView.setScale(MapView.Scale.CLOSEST);
         try {
-        	MapView.class.getMethod("setUnlimitedTracking", boolean.class);
-        	mapView.setUnlimitedTracking(true);
-        } catch (NoSuchMethodException e) {}
-        
+            MapView.class.getMethod("setUnlimitedTracking", boolean.class);
+            mapView.setUnlimitedTracking(true);
+        } catch (NoSuchMethodException e) {
+        }
+
         mapView.getRenderers().clear();
         mapView.addRenderer(new MapRenderer() {
-        	@Override
+            private boolean rendered = false;
+
+            @Override
             public void render(MapView mapView, MapCanvas mapCanvas, Player player) {
-                mapCanvas.drawImage(0, 0, image);
+                if (!rendered && image != null) {
+                    mapCanvas.drawImage(0, 0, image);
+                    rendered = true;
+                }
             }
-		});
-        
+        });
+
         try {
-        	MapMeta.class.getMethod("setMapView", MapView.class);
-        	mapMeta.setMapView(mapView);
+            MapMeta.class.getMethod("setMapView", MapView.class);
+            mapMeta.setMapView(mapView);
         } catch (NoSuchMethodException e) {
-        	itemStack.setDurability(getMapID(mapView));
+            itemStack.setDurability(getMapID(mapView));
         }
-        
+
         InventoryManager.updateMapMeta(AutoPix.getInstance(), mapMeta, p, op);
-        
+
         itemStack.setItemMeta(mapMeta);
 
         return itemStack;
     }
-    
+
     public static Class<?> getMapNMS(String name) {
         try {
             return Class.forName("org.bukkit.map." + name);
         } catch (Exception e) {
-            e.printStackTrace();
+            return null;
         }
-        return null;
     }
 
     public static short getMapID(MapView view) {
-      try {
+        try {
             return (short) view.getId();
         } catch (NoSuchMethodError e) {
             try {
-                Class<?> MapView = getMapNMS("MapView");
-                Object mapID = MapView.getMethod("getId").invoke(view);
-                return (short)mapID;
-            } catch (Exception ex) { return 1; }
+                Class<?> mapViewClass = getMapNMS("MapView");
+                Object mapID = mapViewClass.getMethod("getId").invoke(view);
+                return (short) mapID;
+            } catch (Exception ex) {
+                return 1;
+            }
         }
     }
 }

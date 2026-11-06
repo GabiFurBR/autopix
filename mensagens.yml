@@ -1,21 +1,44 @@
-# Erros
+# Erros e Protecao
 in-game: '&b[AutoPix] &cEste comando so pode ser usado dentro do jogo.'
 sem-permissao: '&b[AutoPix] &cVoce nao possui permissao!'
 erro-sql: '&b[AutoPix] &cErro ao iniciar conexao ao banco. Verifique o erro: {mensagem}'
 erro: '&b[AutoPix] &cOcorreu um erro. Tente novamente mais tarde.'
 aguarde: '&b[AutoPix] &cAguarde mais &f{tempo} &csegundos para executar essa acao novamente.'
 db-invalido: '&b[AutoPix] &cO tipo de banco de dados informado nao e valido.'
+processando-pedido: '&b[AutoPix] &eSeu pedido ja esta sendo gerado. Aguarde alguns instantes...'
 
-
-# Titulo
+# Titulos e Subtitulos
 titulo-qr: '&a&lScaneie o código &b&lQR'
 subtitulo-qr: '&7&le pague pelo &c&lPIX&7&l. Use &f&l/pix info'
+titulo-aprovado: '&a&lPAGAMENTO APROVADO!'
+subtitulo-aprovado: '&fProduto &e{produto} &fentregue com sucesso!'
+titulo-rejeitado: '&c&lPAGAMENTO NAO APROVADO'
+subtitulo-rejeitado: '&7Verifique o status do seu pedido em &f/pix lista'
+titulo-expirado: '&c&lPEDIDO EXPIRADO'
+subtitulo-expirado: '&7O tempo para pagamento do pedido &f#{id} &7acabou.'
+
+# Actionbars
+actionbar-gerando: '&e⏳ Gerando cobrança PIX para &f{produto}&e...'
+actionbar-pendente: '&e⏳ PIX pendente (&f{produto}&e) - Tempo restante: &f{tempo} min'
+actionbar-aprovado: '&a✔ Pagamento do produto &f{produto} &aaprovado!'
+actionbar-cancelado: '&c✖ Pedido PIX cancelado.'
+actionbar-expirado: '&c⏰ Seu pedido PIX expirou por falta de pagamento.'
+
+# Notificacoes no Chat
+pagamento-aprovado-chat: '&b[AutoPix] &aSeu pagamento do produto &f{produto} &a(&fR${preco}&a) foi aprovado!'
+pagamento-rejeitado-chat: '&b[AutoPix] &cSeu pagamento do pedido &f#{id} &cnão foi aprovado ({status}).'
+pedido-expirado-chat: '&b[AutoPix] &cSeu pedido &f#{id} &c(&f{produto}&c) expirou após &f{tempo} &cminutos sem pagamento.'
+pedido-recuperado-join: '&b[AutoPix] &eVocê possui um pedido PIX pendente (&f{produto}&e). Restam &f{tempo} min &epara pagar ou use &f/pix cancelar&e.'
 
 # Ajuda
 ajuda-autopix:
 - '&7=========== &bAutoPix &7==========='
+- '&b/comprarpix &f- &7Abrir loja de produtos por PIX'
 - '&b/pix info &f- &7Ver instrucoes de validacao'
 - '&b/pix lista &f- &7Ver suas transacoes criadas'
+- '&b/pix historico &f- &7Abrir menu visual de pedidos'
+- '&b/pix cancelar &f- &7Cancelar pedido pendente atual'
+- '&b/pix top &f- &7Ver ranking de compradores'
 - '&b/pix validar <Codigo> &7- Validar uma transacao por PIX'
 - ' '
 

@@ -3,11 +3,18 @@ version: 1.1.0-neon
 main: io.github.warleysr.autopix.AutoPix
 author: warleysr
 api-version: 1.13
-softdepend: [PlaceholderAPI]
+softdepend: [PlaceholderAPI, Skript]
 commands:
   autopix:
-    description: Valida uma transacao realizada por PIX
+    description: Gerencia e valida transacoes realizadas por PIX
     aliases: [ap, pix]
   autopixmenu:
     description: Abre o menu de itens disponivel para compra por PIX
     aliases: [comprarpix]
+permissions:
+  autopix.use:
+    description: Permite abrir a loja e o historico de pedidos PIX
+    default: true
+  autopix.admin:
+    description: Permite consultar pedidos de terceiros e recarregar o plugin
+    default: op

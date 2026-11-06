@@ -11,6 +11,8 @@ pix:
 automatico:
   ativado: true
   intervalo: 10
+  # Opcional: URL HTTPS para webhook de notificacao do Mercado Pago (deixe vazio se nao utilizar)
+  notificacoes: ''
 
 # Banco de dados: postgresql (Neon), mysql ou sqlite.
 # Para Neon, use o HOST com "-pooler" fornecido pelo botao Connect.
@@ -24,6 +26,7 @@ database:
   pass: 'SUA_SENHA'
   sslmode: require
   channel-binding: require
+  use-ssl: false
   pool:
     maximum-size: 3
     minimum-idle: 0
@@ -52,6 +55,7 @@ menu:
   principal:
       titulo: '&9&lCompre produtos por &c&lPIX'
       tamanho: 54
+      preencher-fundo: false
       produtos:
         VIP1:
           preco: 0.23
@@ -66,19 +70,30 @@ menu:
             descricao:
             - '&7Vip por &c30 &7dias'
             - '&7Clique para comprar por &aPIX'
+      historico:
+        slot: 50
+        icone:
+          material: clock
+          nome: '&b&lMeus Pedidos PIX'
+          descricao:
+          - '&7Clique para visualizar seu'
+          - '&7historico e status em tempo real.'
   confirmar:
     titulo: '&9&lConfirmar compra por &c&lPIX'
     tamanho: 27
+    preencher-fundo: true
+    resumo:
+      slot: 5
     cancelar:
       slot: 19
       icone:
-        material: wool
+        material: RED_WOOL
         data: 14
         nome: '&cCancelar'
     confirmar:
       slot: 27
       icone:
-        material: wool
+        material: LIME_WOOL
         data: 5
         nome: '&aConfirmar'
         descricao:
@@ -91,6 +106,8 @@ menu:
         nome: '&bAplicar cupom'
         descricao:
         - '&7Clique para informar um cupom no chat'
+  historico:
+    titulo: '&9&lHistórico de Pedidos &b&lPIX'
 
 cupons:
   desconto15:
@@ -99,9 +116,68 @@ cupons:
     itens:
     - vip1
 
+# Configuracao legada mantida por compatibilidade
 som:
   ativar: true
   efeito: BLOCK_NOTE_BLOCK_BASS
+
+# Configuracoes independentes de som (executados na thread principal)
+sons:
+  abrir-menu:
+    ativar: true
+    som: BLOCK_CHEST_OPEN
+    volume: 0.7
+    pitch: 1.1
+  selecionar-produto:
+    ativar: true
+    som: UI_BUTTON_CLICK
+    volume: 0.8
+    pitch: 1.2
+  confirmar-compra:
+    ativar: true
+    som: BLOCK_NOTE_BLOCK_PLING
+    volume: 0.9
+    pitch: 1.3
+  gerar-qrcode:
+    ativar: true
+    som: ENTITY_EXPERIENCE_ORB_PICKUP
+    volume: 1.0
+    pitch: 1.2
+  pagamento-aprovado:
+    ativar: true
+    som: ENTITY_PLAYER_LEVELUP
+    volume: 1.0
+    pitch: 1.0
+  pagamento-rejeitado:
+    ativar: true
+    som: ENTITY_VILLAGER_NO
+    volume: 1.0
+    pitch: 0.9
+  pagamento-cancelado:
+    ativar: true
+    som: BLOCK_NOTE_BLOCK_BASS
+    volume: 0.9
+    pitch: 0.8
+  erro-conexao:
+    ativar: true
+    som: BLOCK_ANVIL_LAND
+    volume: 0.6
+    pitch: 0.8
+  pedido-expirado:
+    ativar: true
+    som: BLOCK_NOTE_BLOCK_DIDGERIDOO
+    volume: 0.9
+    pitch: 0.8
+
+# Notificacoes opcionais via Discord Webhook (independente de DiscordSRV/DiSky)
+discord:
+  webhook:
+    ativado: false
+    url: ''
+    username: 'AutoPix'
+    cor: 3066993
+    titulo: 'Pagamento PIX Aprovado!'
+    descricao: 'O jogador **{player}** adquiriu **{produto}** por **R$ {valor}** (Pedido `#{pedido}`).'
 
 top-doadores: 5
 

@@ -1,22 +1,18 @@
 package io.github.warleysr.autopix;
 
 import java.sql.SQLException;
-import java.util.concurrent.TimeUnit;
 
 import org.bukkit.Bukkit;
-import org.bukkit.entity.Player;
+import org.bukkit.command.PluginCommand;
 import org.bukkit.plugin.java.JavaPlugin;
 import org.bukkit.scheduler.BukkitRunnable;
 import org.bukkit.scheduler.BukkitTask;
 
 import io.github.warleysr.autopix.commands.APMenuCommand;
 import io.github.warleysr.autopix.commands.AutoPixCommand;
-import io.github.warleysr.autopix.domain.Order;
-import io.github.warleysr.autopix.domain.PixData;
 import io.github.warleysr.autopix.expansion.AutoPixExpansion;
 import io.github.warleysr.autopix.inventory.InventoryListener;
 import io.github.warleysr.autopix.inventory.InventoryManager;
-import io.github.warleysr.autopix.mercadopago.MercadoPagoAPI;
 
 public class AutoPix extends JavaPlugin {
 
@@ -31,8 +27,18 @@ public class AutoPix extends JavaPlugin {
         saveDefaultConfig();
         if (!reloadPlugin()) return;
 
-        getCommand("autopix").setExecutor(new AutoPixCommand());
-        getCommand("autopixmenu").setExecutor(new APMenuCommand());
+        AutoPixCommand autoPixCommand = new AutoPixCommand();
+        PluginCommand apCmd = getCommand("autopix");
+        if (apCmd != null) {
+            apCmd.setExecutor(autoPixCommand);
+            apCmd.setTabCompleter(autoPixCommand);
+        }
+
+        PluginCommand menuCmd = getCommand("autopixmenu");
+        if (menuCmd != null) {
+            menuCmd.setExecutor(new APMenuCommand());
+        }
+
         Bukkit.getPluginManager().registerEvents(new InventoryListener(), this);
 
         if (Bukkit.getPluginManager().isPluginEnabled("PlaceholderAPI")) {
@@ -75,6 +81,8 @@ public class AutoPix extends JavaPlugin {
         PIX_KEY = plugin.getConfig().getString("pix.chave");
         PIX_NAME = plugin.getConfig().getString("pix.nome");
         MSG.loadMessages(plugin);
+        SoundManager.loadSounds(plugin);
+        OrderManager.syncOnlinePlayersFromServer();
 
         try {
             if (!OrderManager.startOrderManager(plugin)) {
@@ -109,40 +117,20 @@ public class AutoPix extends JavaPlugin {
         MAPS_TASK = new BukkitRunnable() {
             @Override
             public void run() {
-                for (Player p : Bukkit.getOnlinePlayers()) {
-                    Order order = OrderManager.getLastOrder(p.getName());
-                    if (order == null) continue;
-
-                    long diff = System.currentTimeMillis() - order.getCreated().getTime();
-                    long minutes = TimeUnit.MILLISECONDS.toMinutes(diff);
-                    if (minutes < plugin.getConfig().getInt("mapa.tempo-pagar")) continue;
-
-                    InventoryManager.removeUnpaidMaps(p);
-                    PixData pd = OrderManager.getPixData(order);
-                    if (pd == null || !pd.isPending()) continue;
-
-                    OrderManager.setPixDataStatus(pd, "cancelled");
-                    try {
-                        MercadoPagoAPI.cancelPayment(plugin, pd.getPaymentId());
-                    } catch (Exception exception) {
-                        exception.printStackTrace();
-                    }
-                }
+                OrderManager.processOrderExpirations(plugin);
             }
         }.runTaskTimerAsynchronously(plugin, remInterval * 20L, remInterval * 20L);
 
         cancelTask(HOLOGRAM_TASK);
-        if (Bukkit.getPluginManager().isPluginEnabled("PlaceholderAPI")) {
-            int holoInterval = Math.max(5, plugin.getConfig().getInt("tempos.holograma", 30));
-            HOLOGRAM_TASK = new BukkitRunnable() {
-                @Override
-                public void run() {
-                    AutoPixExpansion.updateTopDonorsCache(OrderManager.getTopDonors());
-                }
-            }.runTaskTimerAsynchronously(plugin, 0L, holoInterval * 20L);
-        } else {
-            HOLOGRAM_TASK = null;
-        }
+        int holoInterval = Math.max(5, plugin.getConfig().getInt("tempos.holograma", 30));
+        int topLimit = Math.max(1, Math.min(100, plugin.getConfig().getInt("top-doadores", 5)));
+        HOLOGRAM_TASK = new BukkitRunnable() {
+            @Override
+            public void run() {
+                OrderManager.refreshStatsCacheNow(topLimit);
+            }
+        }.runTaskTimerAsynchronously(plugin, 0L, holoInterval * 20L);
+
         return true;
     }
 }

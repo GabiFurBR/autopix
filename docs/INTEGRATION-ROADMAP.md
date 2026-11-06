@@ -1,66 +1,63 @@
-# Integration roadmap
+# Integration Roadmap & Guide
 
-## Priority 1: Skript bridge
+## 1. Skript Bridge (Implemented)
 
-Recommended first-class optional integration.
+AutoPix dispatches immutable Bukkit events on the main server thread under `io.github.warleysr.autopix.events`:
+- `OrderCreatedEvent`
+- `PaymentApprovedEvent`
+- `PaymentRejectedEvent`
+- `PaymentCancelledEvent`
 
-Expose Bukkit events with immutable order/payment data:
-- OrderCreatedEvent
-- PaymentApprovedEvent
-- PaymentRejectedEvent
-- PaymentCancelledEvent
+Events never expose Mercado Pago access tokens, PIX keys, database credentials or raw QR payloads. They provide:
+- `getOrderId()` (`int`)
+- `getPlayer()` (`Player`, if online) and `getPlayerName()` (`String`)
+- `getPlayerUniqueId()` (`UUID`, if available)
+- `getProduct()` (`String`)
+- `getAmount()` (`double`)
+- `getPaymentId()` (`String`)
+- `getStatus()` (`String`)
 
-Events must be fired on the server thread. They must not expose Mercado Pago access tokens, PIX keys, database credentials or raw QR payloads. Include player name/UUID when reliably available, product key, order ID, amount, payment ID and final status.
+### Example Usage in Skript (`skript-reflect`)
 
-This lets Skript call DiSky or DiscordSRV features, update NeoRankUP variables, play custom sounds or dispatch server-specific reward commands without making AutoPix depend on Skript.
+```skript
+import:
+    io.github.warleysr.autopix.events.PaymentApprovedEvent
+    io.github.warleysr.autopix.events.OrderCreatedEvent
 
-## Priority 2: PlaceholderAPI
+on PaymentApprovedEvent:
+    set {_player} to event.getPlayerName()
+    set {_produto} to event.getProduct()
+    set {_valor} to event.getAmount()
+    set {_pedido} to event.getOrderId()
+    broadcast "&b[AutoPix] &f%{_player}% &aadquiriu &e%{_produto}% &apor &aR$ %{_valor}%&a!"
+```
 
-Already integrated in the original project through the AutoPix expansion and top-donor cache.
+## 2. PlaceholderAPI (Implemented)
 
-Future placeholders:
-- total approved revenue
-- approved order count
-- pending order count
-- a player's approved spending
-- a player's approved order count
-- top donor name and value by position
+All placeholders are served from an asynchronous cache (`OrderManager.refreshStatsCacheNow`) and never execute SQL queries on the placeholder request thread:
+- `%autopix_total_arrecadado%` / `%autopix_total_arrecadado_formatado%`
+- `%autopix_pagamentos_aprovados%`
+- `%autopix_pedidos_pendentes%`
+- `%autopix_jogador_gasto%` / `%autopix_jogador_gasto_formatado%`
+- `%autopix_jogador_compras%`
+- `%autopix_top_<pos>%`
+- `%autopix_top_<pos>_nome%`
+- `%autopix_top_<pos>_valor%` / `%autopix_top_<pos>_valor_formatado%`
+- `%autopix_top_<pos>_compras%`
 
-Update cached aggregates asynchronously; placeholder requests must never run SQL queries synchronously.
+FancyHolograms, TAB and AdvancedServerList can consume these placeholders directly without custom plugin hooks.
 
-FancyHolograms, TAB and compatible server-list plugins can consume these values through PlaceholderAPI without direct dependencies.
+## 3. Discord Notifications (Implemented)
 
-## Priority 3: Discord notifications
+Two non-conflicting options are available:
+1. **Event-driven via Skript**: Listen to `PaymentApprovedEvent` in Skript and send messages/embeds through DiSky or DiscordSRV.
+2. **Built-in Discord Webhook**: Enable `discord.webhook.ativado: true` and set `discord.webhook.url` in `config.yml` for zero-dependency asynchronous Discord embed notifications.
 
-Prefer the event-driven route through Skript first. This avoids hard dependencies and lets the server owner choose DiscordSRV or DiSky.
+## 4. Command-Driven Reward Integrations
 
-Do not assume DiscordSRV and DiSky can safely coexist in the same runtime: their JDA dependencies may conflict. Verify the exact installed versions before selecting a Discord API integration. A neutral webhook sender is another option.
-
-## Existing command-based integrations (no bridge needed yet)
-
-The product config already dispatches console commands. This is generally enough for:
-- LuckPerms: grant groups and permissions.
-- Essentials: issue economy, item or utility commands.
-- Oraxen: grant configured custom items through its commands.
-- ExecutableItems, ExecutableBlocks and ExecutableEvents: invoke their documented reward commands.
-- Skript: call a custom Skript command as console.
-
-Keep these configuration-driven unless a missing feature proves a direct API hook is necessary.
-
-## Low priority or no direct bridge
-
-- AdvancedBanZ, Maintenance, nLogin: account access/moderation is not part of payment persistence.
-- Backuper, InventoryRollbackPlus: backup and rollback concerns; payment records should be immutable to these systems.
-- Chunky, FAWE, WorldGuard, Multiverse-Core, Parkour, GSit: unrelated to PIX order processing.
-- ConsoleSpamFixReborn, PlugManX, ProtocolLib, PacketEvents, ViaVersion, ViaBackwards, ViaRewind, voicechat, Votifier: no core payment feature needs a direct integration.
-- FancyHolograms: use PlaceholderAPI first; direct API integration is redundant for basic statistics.
-- AdvancedServerList: use PlaceholderAPI if supported by the installed version; verify that before adding an integration.
-- OpenRadPlugin, SCore, SkDialogs, ItemEdit, ItemTag, java_site, SkinsRestorer and less-specific components: wait for a concrete use case and verify the exact plugin/API version before adding a dependency.
-
-## Integration design rules
-
-- All integrations must be optional and detected safely.
-- Payment validation must not depend on another gameplay plugin.
-- Never execute Bukkit API calls from SQL/network worker threads.
-- Never treat a command callback as proof that a payment was approved; only the Mercado Pago validation path can establish approval.
-- Never store or log access tokens, PIX keys, database passwords or QR payloads.
+Product configurations in `config.yml` execute console commands on the main thread after a verified approval:
+- **LuckPerms**: `lp user {player} parent addtemp vip 30d`
+- **Essentials**: `eco give {player} 10000`
+- **Oraxen**: `oraxen give {player} custom_item 1`
+- **ExecutableItems / ExecutableBlocks / ExecutableEvents**: invoke their documented console reward commands.
+- **Skript**: invoke custom Skript commands from console.

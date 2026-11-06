@@ -1,44 +1,58 @@
 # AutoPix Neon
 
-Community fork of [AutoPix](https://github.com/warleysr/autopix), originally created by [WarleySR](https://github.com/warleysr). This fork keeps the original PIX and Mercado Pago workflow and adds PostgreSQL/Neon support, pooled JDBC connections and a reproducible build.
-
-## Current status
-
-This is a development build. It has not yet been validated against a live Neon database or a production Minecraft server. Do not use it to process real payments until the test checklist below has passed.
+Community fork of [AutoPix](https://github.com/warleysr/autopix), originally created by [WarleySR](https://github.com/warleysr). This fork preserves the original PIX and Mercado Pago workflow while adding first-class PostgreSQL/Neon support, pooled JDBC connections, strict payment idempotency, modernized menus, configurable sound effects, expanded PlaceholderAPI statistics, Bukkit events for Skript, and optional Discord Webhook notifications.
 
 ## Features
 
-- Original AutoPix menus, QR Code PIX flow and Mercado Pago integration.
-- PostgreSQL support, including Neon.
-- MySQL and SQLite modes retained.
-- HikariCP connection pool with configurable limits and idle connection retirement.
-- Existing PlaceholderAPI expansion retained.
-- Maven build targeting Paper 26.3 / Java 25.
+- **Financial Integrity & Strict Idempotency**:
+  - Atomic SQL transaction for order + PIX creation (`autopix_orders` and `autopix_pix_data`), with automatic Mercado Pago payment cancellation if local persistence fails.
+  - Strictly idempotent payment approval (`WHERE pix IS NULL` and `WHERE status = 'pending'`) preventing duplicate reward deliveries even under concurrent checks or multiple server instances.
+  - Exact cent-level amount validation (`BigDecimal` with `HALF_UP` rounding for discounts) preventing false `amount_mismatch` on coupon purchases.
+  - Protected status transitions ensuring approved payments can never be overwritten by expiration or cancellation tasks.
+- **Database & Connection Pooling**:
+  - PostgreSQL / Neon support (`sslmode`, `channel-binding`, TCP keep-alive, login/socket timeouts and cold-start retry).
+  - MySQL and SQLite modes retained.
+  - HikariCP connection pool with bounded limits and automatic non-destructive column width upgrades.
+- **Modernized Menus & Player Experience**:
+  - Per-player confirmation GUI displaying a live order summary (product, original price, applied coupon, final PIX value and payment time limit).
+  - Visual purchase history & live status GUI (`/pix historico`) with real-time updates when open, allowing players to restore a pending QR map or cancel a pending order.
+  - Automatic legacy material resolution (`WOOL` + data values mapped to modern Paper materials).
+  - Safe QR map delivery that never overwrites items held by the player, plus automatic pending order recovery on reconnect.
+  - Configurable titles, subtitles and actionbars.
+- **Independent Sound Configuration**:
+  - 9 individually configurable sound triggers (`abrir-menu`, `selecionar-produto`, `confirmar-compra`, `gerar-qrcode`, `pagamento-aprovado`, `pagamento-rejeitado`, `pagamento-cancelado`, `erro-conexao`, `pedido-expirado`) resolved via Paper's sound registry on the main thread.
+- **Server Integrations**:
+  - **Skript / Bukkit Events**: `OrderCreatedEvent`, `PaymentApprovedEvent`, `PaymentRejectedEvent`, `PaymentCancelledEvent` fired on the main server thread without requiring Skript at compile or runtime.
+  - **PlaceholderAPI**: Asynchronous cached placeholders for total revenue, approved count, pending count, per-player spending/order count, and top donor names/values/orders by rank.
+  - **Discord Webhook**: Optional native asynchronous webhook notification on payment approval (`discord.webhook`).
+- **Build & Runtime**:
+  - Reproducible Maven build targeting Paper/Purpur 26.3 and Java 25, with automated JUnit 5 verification suite.
 
 ## Requirements
 
-- Paper/Purpur 26.3 and Java 25 for this build.
+- Paper/Purpur 26.3 and Java 25.
 - Maven 3.9+ to compile locally.
-- PlaceholderAPI is optional at runtime; it is used for the existing AutoPix expansion.
+- PlaceholderAPI (optional at runtime).
+- Skript / skript-reflect (optional at runtime for consuming Bukkit events).
 - A Mercado Pago access token and PIX configuration for payment processing.
 
-## Build
+## Build & Test
 
-Run `mvn clean package`.
+Run:
 
-The shaded plugin JAR is generated in `target/autopix-neon-1.1.0-SNAPSHOT.jar`.
+```bash
+mvn clean package
+```
 
-GitHub Actions also builds the plugin on pushes and pull requests to `master` and `develop`. Download the artifact from the workflow run; this repository does not commit compiled JARs.
+This executes the JUnit 5 test suite and produces the shaded plugin JAR in `target/autopix-neon-1.1.0-SNAPSHOT.jar`.
 
-## Neon / PostgreSQL configuration
+## Neon / PostgreSQL Configuration
 
 1. In the Neon Console, open **Connect** and select the branch, database and role you intend to use.
-2. Use the pooled endpoint hostname (the hostname contains `-pooler`) for a long-running game server with concurrent database operations.
+2. Use the pooled endpoint hostname (containing `-pooler`) for a long-running game server with concurrent database operations.
 3. Copy the hostname, database, role and password into the local `plugins/AutoPix/config.yml` file.
 4. Keep `sslmode: require` and `channel-binding: require`.
-5. Use a dedicated Neon database for AutoPix rather than sharing application tables with the website.
-
-Example:
+5. Use a dedicated Neon database for AutoPix rather than sharing application tables with a website.
 
 ```yaml
 database:
@@ -50,6 +64,7 @@ database:
   pass: 'CHANGE_ME'
   sslmode: require
   channel-binding: require
+  use-ssl: false
   pool:
     maximum-size: 3
     minimum-idle: 0
@@ -58,35 +73,36 @@ database:
     max-lifetime: 300000
 ```
 
-Never commit the real config.yml, Mercado Pago token, PIX key or database password. The repository's config.yml contains placeholders only. Rotate any credential that is accidentally published.
+Never commit the real `config.yml`, Mercado Pago token, PIX key or database password.
 
-### Database modes
+## Placeholders (PlaceholderAPI)
 
-- `postgresql` (or `postgres`): PostgreSQL and Neon. Uses SSL and channel binding by default.
-- `mysql`: MySQL using the configured host, port, database, user and password.
-- `sqlite`: local `autopix.db` file in the plugin folder.
+All placeholders are served from an asynchronous memory cache and never run SQL queries on the calling thread:
 
-The plugin creates the original `autopix_orders` and `autopix_pix_data` tables automatically. Existing MySQL/SQLite schemas are not migrated or copied into PostgreSQL. Use a fresh, dedicated Neon database for the first test.
+| Placeholder | Alias | Description |
+| :--- | :--- | :--- |
+| `%autopix_total_arrecadado%` | `%autopix_total_revenue%` | Total approved revenue (e.g. `150,00`) |
+| `%autopix_total_arrecadado_formatado%` | `%autopix_total_revenue_formatted%` | Formatted total revenue (`R$ 150,00`) |
+| `%autopix_pagamentos_aprovados%` | `%autopix_approved_count%` | Total number of approved payments |
+| `%autopix_pedidos_pendentes%` | `%autopix_pending_count%` | Current number of pending PIX orders |
+| `%autopix_jogador_gasto%` | `%autopix_player_spent%` | Player's total approved spending |
+| `%autopix_jogador_gasto_formatado%` | `%autopix_player_spent_formatted%` | Player's formatted spending (`R$ 45,00`) |
+| `%autopix_jogador_compras%` | `%autopix_player_orders%` | Player's approved order count |
+| `%autopix_top_<pos>%` | — | Formatted top donor line from `mensagens.yml` |
+| `%autopix_top_<pos>_nome%` | `%autopix_top_name_<pos>%` | Donor name at position `<pos>` |
+| `%autopix_top_<pos>_valor%` | `%autopix_top_value_<pos>%` | Donor total at position `<pos>` |
+| `%autopix_top_<pos>_valor_formatado%` | `%autopix_top_value_formatted_<pos>%` | Formatted donor total (`R$ 50,00`) |
+| `%autopix_top_<pos>_compras%` | `%autopix_top_orders_<pos>%` | Donor approved order count at `<pos>` |
 
-## Test checklist before production
+## Bukkit Events (Skript Bridge)
 
-- Confirm startup creates both tables in the intended Neon database.
-- Create a test order and confirm the generated order ID is correct.
-- Generate a PIX payment and confirm its payment ID and QR data are stored.
-- Pay with a controlled low-value test and confirm the exact amount is checked.
-- Confirm the configured product commands run once after an approved payment.
-- Test pending, rejected, cancelled and expired payments.
-- Restart the server with a pending payment and verify that it remains recoverable.
-- Stop the database briefly, restore connectivity and verify that the pool recovers.
-- Confirm `/pix lista`, manual validation and top-donor placeholders still work.
-- Test the plugin with MySQL and SQLite if those modes are still required.
+Package: `io.github.warleysr.autopix.events`
 
-## Integration roadmap
+- `OrderCreatedEvent`: `getOrderId()`, `getPlayer()`, `getPlayerName()`, `getPlayerUniqueId()`, `getProduct()`, `getAmount()`, `getPaymentId()`, `getStatus()`, `getCreatedAt()`
+- `PaymentApprovedEvent`: `getOrderId()`, `getPlayer()`, `getPlayerName()`, `getPlayerUniqueId()`, `getProduct()`, `getAmount()`, `getPaymentId()`, `getTransactionId()`, `getStatus()`
+- `PaymentRejectedEvent`: `getOrderId()`, `getPlayer()`, `getPlayerName()`, `getPlayerUniqueId()`, `getProduct()`, `getAmount()`, `getPaidAmount()`, `getPaymentId()`, `getStatus()`, `getReason()`
+- `PaymentCancelledEvent`: `getOrderId()`, `getPlayer()`, `getPlayerName()`, `getPlayerUniqueId()`, `getProduct()`, `getAmount()`, `getPaymentId()`, `getStatus()`, `getReason()`
 
-The original product configuration executes console commands after a successful payment. This already supports command-driven rewards from LuckPerms, Essentials, Oraxen and ExecutableItems without adding hard dependencies. PlaceholderAPI support is already present in the original project.
-
-The most useful future addition is a small optional Skript bridge that exposes Bukkit events for order creation, payment approval, rejection and cancellation. DiscordSRV or DiSky can then react to those events without becoming required dependencies. FancyHolograms, TAB and other PlaceholderAPI-compatible plugins can consume AutoPix statistics. Avoid hard hooks to unrelated plugins unless a concrete feature needs them.
-
-## Credits and license
+## Credits and License
 
 This repository is a community fork. The original project and its license notices are preserved. Thanks to WarleySR for AutoPix and to the QRCodeMap contributors referenced by the original project. See [LICENSE](LICENSE).
