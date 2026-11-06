@@ -44,6 +44,9 @@ public class AutoPix extends JavaPlugin {
         if (Bukkit.getPluginManager().isPluginEnabled("PlaceholderAPI")) {
             new AutoPixExpansion().register();
         }
+
+        // Run crash recovery only once per plugin enable, never on /autopix reload.
+        OrderManager.recoverPendingDeliveries(this);
     }
 
     @Override
@@ -97,7 +100,6 @@ public class AutoPix extends JavaPlugin {
         }
 
         InventoryManager.createMenuInventory(plugin);
-        OrderManager.recoverPendingDeliveries(plugin);
 
         if (plugin.getConfig().getBoolean("automatico.ativado")) {
             cancelTask(VALIDATE_TASK);
