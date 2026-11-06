@@ -97,6 +97,7 @@ public class AutoPix extends JavaPlugin {
         }
 
         InventoryManager.createMenuInventory(plugin);
+        OrderManager.recoverPendingDeliveries(plugin);
 
         if (plugin.getConfig().getBoolean("automatico.ativado")) {
             cancelTask(VALIDATE_TASK);

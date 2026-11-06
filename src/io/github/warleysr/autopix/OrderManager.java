@@ -212,6 +212,9 @@ public class OrderManager {
             statement.executeUpdate("CREATE TABLE IF NOT EXISTS autopix_pix_data "
                     + "(payment_id VARCHAR(128) PRIMARY KEY, order_id INTEGER NOT NULL UNIQUE, "
                     + "status VARCHAR(32), qr_code TEXT NOT NULL);");
+            statement.executeUpdate("CREATE TABLE IF NOT EXISTS autopix_deliveries "
+                    + "(order_id INTEGER PRIMARY KEY, status VARCHAR(32) NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, "
+                    + "updated_at TIMESTAMP NOT NULL, last_error TEXT NULL);");
             ensureSchemaUpgraded(statement, dbType);
         }
     }
@@ -384,6 +387,15 @@ public class OrderManager {
         }
     }
 
+    private static void insertDeliveryOutbox(Connection connection, int orderId) throws SQLException {
+        String sql = "INSERT INTO autopix_deliveries (order_id, status, attempts, updated_at, last_error) "
+                + "VALUES (?, 'pending', 0, CURRENT_TIMESTAMP, NULL);";
+        try (PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setInt(1, orderId);
+            statement.executeUpdate();
+        }
+    }
+
     private static PreparedStatement prepareInsertIdStatement(Connection connection, String sql) throws SQLException {
         if ("postgresql".equalsIgnoreCase(activeDbType)) {
             return connection.prepareStatement(sql, new String[]{"id"});
@@ -536,6 +548,7 @@ public class OrderManager {
                 paymentStatement.setInt(1, order.getId());
                 paymentStatement.executeUpdate();
 
+                insertDeliveryOutbox(connection, order.getId());
                 connection.commit();
                 order.setTransaction(transactionId.trim());
                 return true;
@@ -575,6 +588,7 @@ public class OrderManager {
                     return false;
                 }
 
+                insertDeliveryOutbox(connection, order.getId());
                 connection.commit();
                 pixData.setStatus("approved");
                 order.setTransaction(transactionId.trim());
@@ -722,77 +736,178 @@ public class OrderManager {
         }.runTask(ap);
     }
 
+    private static boolean claimDelivery(int orderId) {
+        String sql = "UPDATE autopix_deliveries SET status = 'processing', attempts = attempts + 1, "
+                + "updated_at = CURRENT_TIMESTAMP, last_error = NULL WHERE order_id = ? AND status = 'pending';";
+        try (Connection connection = getConnection();
+             PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setInt(1, orderId);
+            return statement.executeUpdate() == 1;
+        } catch (SQLException exception) {
+            logSqlError("Erro ao reservar entrega do pedido #" + orderId, exception);
+            return false;
+        }
+    }
+
+    private static void completeDeliveryAsync(AutoPix ap, int orderId, String status, String error) {
+        Bukkit.getScheduler().runTaskAsynchronously(ap, () -> {
+            String sql = "UPDATE autopix_deliveries SET status = ?, updated_at = CURRENT_TIMESTAMP, last_error = ? "
+                    + "WHERE order_id = ? AND status = 'processing';";
+            try (Connection connection = getConnection();
+                 PreparedStatement statement = connection.prepareStatement(sql)) {
+                statement.setString(1, status);
+                statement.setString(2, error);
+                statement.setInt(3, orderId);
+                if (statement.executeUpdate() != 1) {
+                    ap.getLogger().warning("Nao foi possivel finalizar o registro de entrega do pedido #" + orderId
+                            + ". Verifique autopix_deliveries.");
+                }
+            } catch (SQLException exception) {
+                logSqlError("Erro ao finalizar entrega do pedido #" + orderId, exception);
+            }
+        });
+    }
+
+    private static void markDeliveryForReview(int orderId, String reason) {
+        String sql = "UPDATE autopix_deliveries SET status = 'needs_review', updated_at = CURRENT_TIMESTAMP, "
+                + "last_error = ? WHERE order_id = ? AND status IN ('pending', 'processing');";
+        try (Connection connection = getConnection();
+             PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setString(1, reason);
+            statement.setInt(2, orderId);
+            statement.executeUpdate();
+        } catch (SQLException exception) {
+            logSqlError("Erro ao sinalizar entrega para revisao #" + orderId, exception);
+        }
+    }
+
+    public static void recoverPendingDeliveries(AutoPix ap) {
+        if (ap == null || !ap.isEnabled()) return;
+        Bukkit.getScheduler().runTaskAsynchronously(ap, () -> {
+            String interruptedSql = "UPDATE autopix_deliveries SET status = 'needs_review', "
+                    + "updated_at = CURRENT_TIMESTAMP, last_error = 'Servidor reiniciou durante a entrega; "
+                    + "verifique se os comandos de recompensa foram executados antes de repetir.' "
+                    + "WHERE status = 'processing';";
+            try (Connection connection = getConnection();
+                 PreparedStatement statement = connection.prepareStatement(interruptedSql)) {
+                int interrupted = statement.executeUpdate();
+                if (interrupted > 0) {
+                    ap.getLogger().warning(interrupted + " entrega(s) interrompida(s) precisam de revisao manual. "
+                            + "Nao serao repetidas automaticamente para evitar recompensas duplicadas.");
+                }
+            } catch (SQLException exception) {
+                logSqlError("Erro ao recuperar entregas interrompidas", exception);
+                return;
+            }
+
+            List<Integer> pendingIds = new ArrayList<>();
+            try (Connection connection = getConnection();
+                 PreparedStatement statement = connection.prepareStatement(
+                         "SELECT order_id FROM autopix_deliveries WHERE status = 'pending' ORDER BY order_id ASC;");
+                 ResultSet result = statement.executeQuery()) {
+                while (result.next()) pendingIds.add(result.getInt("order_id"));
+            } catch (SQLException exception) {
+                logSqlError("Erro ao listar entregas pendentes", exception);
+                return;
+            }
+
+            for (Integer orderId : pendingIds) {
+                Order order = getOrderById(orderId);
+                if (order == null || !order.isValidated()) {
+                    markDeliveryForReview(orderId, "Pedido nao encontrado ou sem aprovacao registrada.");
+                    continue;
+                }
+                OrderProduct product = InventoryManager.getProductByOrder(order);
+                if (product == null) {
+                    markDeliveryForReview(orderId, "Produto nao existe mais na configuracao menu.*.produtos.");
+                    ap.getLogger().warning("Entrega do pedido #" + orderId
+                            + " exige revisao: produto ausente na configuracao.");
+                    continue;
+                }
+                PixData pixData = getPixData(order);
+                deliverApprovedOrderOnMainThread(ap, order, product,
+                        pixData != null ? pixData.getPaymentId() : null, order.getTransaction());
+            }
+        });
+    }
+
     public static void deliverApprovedOrderOnMainThread(AutoPix ap, Order order, OrderProduct op,
                                                         String paymentId, String transactionId) {
-        refreshStatsCacheAsync(ap);
-        DiscordNotifier.notifyPaymentApproved(ap, order);
-        UUID playerUuid = getOnlinePlayerUuid(order.getPlayer());
+        if (ap == null || order == null) return;
+        Bukkit.getScheduler().runTaskAsynchronously(ap, () -> {
+            if (!claimDelivery(order.getId())) return;
 
-        Runnable deliveryTask = () -> {
-            Player p = Bukkit.getPlayerExact(order.getPlayer());
-            String formattedPrice = String.format(Locale.ROOT, "%.2f", order.getPrice()).replace('.', ',');
+            refreshStatsCacheAsync(ap);
+            DiscordNotifier.notifyPaymentApproved(ap, order);
+            UUID playerUuid = getOnlinePlayerUuid(order.getPlayer());
 
-            if (p != null && p.isOnline()) {
+            Bukkit.getScheduler().runTask(ap, () -> {
                 try {
-                    int mapSlot = InventoryManager.findPaymentMapSlot(p);
-                    if (mapSlot >= 0) {
-                        try (InputStream successStream = ap.getResource("success.png")) {
-                            if (successStream != null) {
-                                BufferedImage gif = ImageIO.read(successStream);
-                                ItemStack successMap = ImageCreator.generateMap(gif, p, null);
-                                p.getInventory().setItem(mapSlot, successMap);
+                    Player p = Bukkit.getPlayerExact(order.getPlayer());
+                    String formattedPrice = String.format(Locale.ROOT, "%.2f", order.getPrice()).replace('.', ',');
+
+                    if (p != null && p.isOnline()) {
+                        try {
+                            int mapSlot = InventoryManager.findPaymentMapSlot(p);
+                            if (mapSlot >= 0) {
+                                try (InputStream successStream = ap.getResource("success.png")) {
+                                    if (successStream != null) {
+                                        BufferedImage gif = ImageIO.read(successStream);
+                                        ItemStack successMap = ImageCreator.generateMap(gif, p, null);
+                                        p.getInventory().setItem(mapSlot, successMap);
+                                    }
+                                }
+                                new BukkitRunnable() {
+                                    @Override
+                                    public void run() {
+                                        if (p.isOnline()) InventoryManager.removeUnpaidMaps(p);
+                                    }
+                                }.runTaskLater(ap, 100L);
+                            } else {
+                                InventoryManager.removeUnpaidMaps(p);
+                            }
+                        } catch (Exception exception) {
+                            ap.getLogger().warning("Nao foi possivel atualizar o mapa de pagamento de "
+                                    + p.getName() + ": " + exception.getMessage());
+                        }
+
+                        SoundManager.play(p, SoundManager.PAYMENT_APPROVED);
+                        MSG.sendTitle(p, "titulo-aprovado", "subtitulo-aprovado", 10, 70, 20,
+                                "{produto}", order.getProduct(),
+                                "{preco}", formattedPrice,
+                                "{id}", Integer.toString(order.getId()));
+                        MSG.sendActionBar(p, "actionbar-aprovado",
+                                "{produto}", order.getProduct(), "{preco}", formattedPrice);
+                        MSG.sendMessage(p, "pagamento-aprovado-chat",
+                                "{produto}", order.getProduct(),
+                                "{preco}", formattedPrice,
+                                "{id}", Integer.toString(order.getId()));
+                        InventoryManager.refreshOpenInventory(p);
+                    }
+
+                    if (op != null && op.getCommands() != null) {
+                        for (String command : op.getCommands()) {
+                            boolean dispatched = Bukkit.dispatchCommand(Bukkit.getConsoleSender(),
+                                    command.replace("{player}", order.getPlayer()).replace('&', '\u00a7'));
+                            if (!dispatched) {
+                                throw new IllegalStateException("Comando de recompensa nao foi aceito: "
+                                        + command.replace("{player}", order.getPlayer()));
                             }
                         }
-                        new BukkitRunnable() {
-                            @Override
-                            public void run() {
-                                if (p.isOnline()) {
-                                    InventoryManager.removeUnpaidMaps(p);
-                                }
-                            }
-                        }.runTaskLater(ap, 100L);
-                    } else {
-                        InventoryManager.removeUnpaidMaps(p);
                     }
+
+                    AutoPixEventDispatcher.dispatch(new PaymentApprovedEvent(
+                            order.getId(), order.getPlayer(),
+                            p != null ? p.getUniqueId() : playerUuid,
+                            order.getProduct(), order.getPrice(), paymentId, transactionId));
+                    completeDeliveryAsync(ap, order.getId(), "delivered", null);
                 } catch (Exception exception) {
-                    ap.getLogger().warning("Nao foi possivel atualizar o mapa de pagamento de "
-                            + p.getName() + ": " + exception.getMessage());
+                    completeDeliveryAsync(ap, order.getId(), "needs_review", exception.getMessage());
+                    ap.getLogger().severe("Entrega do pedido #" + order.getId()
+                            + " falhou ou ficou incerta. Verifique antes de repetir: " + exception.getMessage());
                 }
-
-                SoundManager.play(p, SoundManager.PAYMENT_APPROVED);
-                MSG.sendTitle(p, "titulo-aprovado", "subtitulo-aprovado", 10, 70, 20,
-                        "{produto}", order.getProduct(),
-                        "{preco}", formattedPrice,
-                        "{id}", Integer.toString(order.getId()));
-                MSG.sendActionBar(p, "actionbar-aprovado",
-                        "{produto}", order.getProduct(),
-                        "{preco}", formattedPrice);
-                MSG.sendMessage(p, "pagamento-aprovado-chat",
-                        "{produto}", order.getProduct(),
-                        "{preco}", formattedPrice,
-                        "{id}", Integer.toString(order.getId()));
-                InventoryManager.refreshOpenInventory(p);
-            }
-
-            if (op != null && op.getCommands() != null) {
-                for (String command : op.getCommands()) {
-                    Bukkit.dispatchCommand(Bukkit.getConsoleSender(),
-                            command.replace("{player}", order.getPlayer()).replace('&', '\u00a7'));
-                }
-            }
-
-            AutoPixEventDispatcher.dispatch(new PaymentApprovedEvent(
-                    order.getId(), order.getPlayer(),
-                    p != null ? p.getUniqueId() : playerUuid,
-                    order.getProduct(), order.getPrice(),
-                    paymentId, transactionId));
-        };
-
-        if (Bukkit.isPrimaryThread()) {
-            deliveryTask.run();
-        } else {
-            Bukkit.getScheduler().runTask(ap, deliveryTask);
-        }
+            });
+        });
     }
 
     protected static void processOrderExpirations(AutoPix ap) {

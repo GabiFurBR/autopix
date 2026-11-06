@@ -9,6 +9,10 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import java.awt.image.BufferedImage;
 import java.io.File;
 import java.nio.file.Path;
+import java.sql.ResultSet;
+import java.sql.PreparedStatement;
+import java.sql.DriverManager;
+import java.sql.Connection;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
@@ -106,6 +110,39 @@ class AutoPixAuditTest {
         assertEquals("9876543210", loadedPix.getPaymentId());
         assertEquals(longQrCode, loadedPix.getQrCode());
         assertTrue(loadedPix.isPending());
+    }
+
+    @Test
+    void testApprovedPaymentCreatesPersistentDeliveryOutbox() throws Exception {
+        PixData pixData = new PixData("PAY-OUTBOX-1", "QR-OUTBOX-1");
+        Order order = OrderManager.createOrderWithPixData("PlayerOutbox", "VIP1", 12.50f, pixData);
+        assertNotNull(order);
+
+        assertTrue(OrderManager.approvePayment(
+                pixData, order, "E5555555555555555555555555555555"));
+
+        String sql = "SELECT status, attempts FROM autopix_deliveries WHERE order_id = ?";
+        try (Connection connection = DriverManager.getConnection("jdbc:sqlite:" + sqliteFile.getAbsolutePath());
+             PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setInt(1, order.getId());
+            try (ResultSet result = statement.executeQuery()) {
+                assertTrue(result.next(), "A aprovacao precisa criar um registro persistente de entrega.");
+                assertEquals("pending", result.getString("status"));
+                assertEquals(0, result.getInt("attempts"));
+            }
+        }
+
+        // The outbox survives a database-pool restart, just like a real server restart.
+        OrderManager.shutdown();
+        initSqlitePool(sqliteFile);
+        try (Connection connection = DriverManager.getConnection("jdbc:sqlite:" + sqliteFile.getAbsolutePath());
+             PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setInt(1, order.getId());
+            try (ResultSet result = statement.executeQuery()) {
+                assertTrue(result.next());
+                assertEquals("pending", result.getString("status"));
+            }
+        }
     }
 
     @Test
