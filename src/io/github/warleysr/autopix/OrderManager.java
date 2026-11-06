@@ -310,12 +310,49 @@ public class OrderManager {
     }
 
     public static boolean setTransaction(Order order, String transactionId) {
-        String sql = "UPDATE autopix_orders SET pix = ? WHERE id = ?;";
+        String sql = "UPDATE autopix_orders SET pix = ? WHERE id = ? AND pix IS NULL;";
         try (Connection connection = getConnection();
              PreparedStatement statement = connection.prepareStatement(sql)) {
             statement.setString(1, transactionId);
             statement.setInt(2, order.getId());
             return statement.executeUpdate() > 0;
+        } catch (SQLException exception) {
+            exception.printStackTrace();
+            return false;
+        }
+    }
+
+    private static boolean approvePayment(PixData pixData, Order order, String transactionId) {
+        String updateOrder = "UPDATE autopix_orders SET pix = ? WHERE id = ? AND pix IS NULL;";
+        String updatePayment = "UPDATE autopix_pix_data SET status = 'approved' WHERE payment_id = ? AND status = 'pending';";
+
+        try (Connection connection = getConnection()) {
+            connection.setAutoCommit(false);
+            try (PreparedStatement orderStatement = connection.prepareStatement(updateOrder);
+                 PreparedStatement paymentStatement = connection.prepareStatement(updatePayment)) {
+                orderStatement.setString(1, transactionId);
+                orderStatement.setInt(2, order.getId());
+                if (orderStatement.executeUpdate() != 1) {
+                    connection.rollback();
+                    return false;
+                }
+
+                paymentStatement.setString(1, pixData.getPaymentId());
+                if (paymentStatement.executeUpdate() != 1) {
+                    connection.rollback();
+                    return false;
+                }
+
+                connection.commit();
+                pixData.setStatus("approved");
+                order.setTransaction(transactionId);
+                return true;
+            } catch (SQLException exception) {
+                connection.rollback();
+                throw exception;
+            } finally {
+                connection.setAutoCommit(true);
+            }
         } catch (SQLException exception) {
             exception.printStackTrace();
             return false;
@@ -350,10 +387,21 @@ public class OrderManager {
 
             PaymentInfo info = MercadoPagoAPI.getPayment(ap, pd.getPaymentId());
             if (info == null) continue;
-            if (!setPixDataStatus(pd, info.getStatus())) continue;
-            if (!info.getStatus().equals("approved")) continue;
-            if (Math.abs(order.getPrice() - info.getPaidAmount()) > 0.001) continue;
-            if (!setTransaction(order, info.getTransactionId())) continue;
+
+            if (!"approved".equalsIgnoreCase(info.getStatus())) {
+                setPixDataStatus(pd, info.getStatus());
+                continue;
+            }
+
+            if (Math.abs(order.getPrice() - info.getPaidAmount()) > 0.001) {
+                ap.getLogger().warning("Pagamento aprovado com valor divergente. Pedido " + order.getId()
+                        + " foi mantido sem entrega; verifique no Mercado Pago.");
+                setPixDataStatus(pd, "amount_mismatch");
+                continue;
+            }
+
+            if (info.getTransactionId() == null || info.getTransactionId().trim().isEmpty()) continue;
+            if (!approvePayment(pd, order, info.getTransactionId())) continue;
 
             new BukkitRunnable() {
                 @SuppressWarnings("deprecation")
