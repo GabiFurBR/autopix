@@ -837,24 +837,63 @@ public class OrderManager {
             }
 
             if (automaticMode) {
+                // Never close the local record before confirming the remote payment state.
+                // A payment can be approved between the expiration check and the cancellation request.
                 PaymentInfo currentInfo = MercadoPagoAPI.getPayment(ap, pd.getPaymentId());
-                if (currentInfo != null && "approved".equalsIgnoreCase(currentInfo.getStatus())) {
+                if (currentInfo == null || currentInfo.getStatus() == null) {
+                    continue; // Keep it pending so the next cycle can reconcile with Mercado Pago.
+                }
+
+                String currentStatus = currentInfo.getStatus().trim().toLowerCase(Locale.ROOT);
+                if ("approved".equals(currentStatus)) {
                     validatePendings(ap);
+                    continue;
+                }
+
+                if ("cancelled".equals(currentStatus) || "rejected".equals(currentStatus)) {
+                    if (setPixDataStatus(pd, currentStatus)) {
+                        handleNonApprovedStatusTransition(ap, order, pd, currentStatus, currentInfo.getPaidAmount());
+                    }
+                    continue;
+                }
+
+                // Mercado Pago only allows cancellation from these states.
+                if (!"pending".equals(currentStatus)
+                        && !"in_process".equals(currentStatus)
+                        && !"authorized".equals(currentStatus)) {
+                    continue; // Unknown/non-cancellable state: do not invent a local cancellation.
+                }
+
+                try {
+                    if (!MercadoPagoAPI.cancelPayment(ap, pd.getPaymentId())) {
+                        continue; // Retry/reconcile later; do not hide a possibly paid transaction.
+                    }
+                } catch (Exception exception) {
+                    ap.getLogger().warning("Erro ao cancelar pedido expirado #" + order.getId()
+                            + " no Mercado Pago: " + exception.getMessage());
+                    continue;
+                }
+
+                // Confirm the final state after the PUT. HTTP success alone is not our source of truth.
+                PaymentInfo confirmedInfo = MercadoPagoAPI.getPayment(ap, pd.getPaymentId());
+                if (confirmedInfo == null || confirmedInfo.getStatus() == null) {
+                    continue;
+                }
+
+                String confirmedStatus = confirmedInfo.getStatus().trim().toLowerCase(Locale.ROOT);
+                if ("approved".equals(confirmedStatus)) {
+                    validatePendings(ap);
+                    continue;
+                }
+                if (!"cancelled".equals(confirmedStatus)) {
                     continue;
                 }
             }
 
+            // In automatic mode this runs only after Mercado Pago confirmed cancellation.
+            // In manual mode there is no remote payment record to cancel.
             if (!cancelPendingPixData(pd)) {
                 continue;
-            }
-
-            if (automaticMode) {
-                try {
-                    MercadoPagoAPI.cancelPayment(ap, pd.getPaymentId());
-                } catch (Exception exception) {
-                    ap.getLogger().warning("Erro ao cancelar pedido expirado #" + order.getId()
-                            + " no Mercado Pago: " + exception.getMessage());
-                }
             }
 
             refreshStatsCacheAsync(ap);
