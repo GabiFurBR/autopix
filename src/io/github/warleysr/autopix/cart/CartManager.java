@@ -2,21 +2,20 @@ package io.github.warleysr.autopix.cart;
 
 import java.math.BigDecimal;
 import java.math.RoundingMode;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
-import java.nio.charset.StandardCharsets;
-import java.util.UUID;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 
 import org.bukkit.entity.Player;
 
 import io.github.warleysr.autopix.domain.CartItem;
-import io.github.warleysr.autopix.domain.OrderProduct;
 import io.github.warleysr.autopix.domain.OrderItem;
+import io.github.warleysr.autopix.domain.OrderProduct;
 import io.github.warleysr.autopix.inventory.InventoryManager;
 
 /**
