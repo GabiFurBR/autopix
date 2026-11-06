@@ -34,6 +34,7 @@ import org.junit.jupiter.api.io.TempDir;
 
 import io.github.warleysr.autopix.discord.DiscordNotifier;
 import io.github.warleysr.autopix.domain.Order;
+import io.github.warleysr.autopix.domain.OrderItem;
 import io.github.warleysr.autopix.domain.PaymentInfo;
 import io.github.warleysr.autopix.domain.PixData;
 import io.github.warleysr.autopix.events.AutoPixEventDispatcher;
@@ -77,6 +78,38 @@ class AutoPixAuditTest {
         cfg.setConnectionTestQuery("SELECT 1");
         cfg.setConnectionInitSql("PRAGMA busy_timeout = 5000;");
         OrderManager.initializePool(cfg, "sqlite");
+    }
+
+    @Test
+    void testCartOrderSnapshotsSurvivePoolRestart() throws Exception {
+        PixData pixData = new PixData("PAY-CART-SNAPSHOT", "QR-CART-SNAPSHOT");
+        List<OrderItem> items = List.of(
+                new OrderItem("VIP Ouro", 2, 12.50f,
+                        List.of("say pre {player} {quantidade}"),
+                        List.of("lp user {player} parent add vip_ouro")),
+                new OrderItem("Chave Lendaria", 1, 14.99f,
+                        List.of(),
+                        List.of("crate key give {player} lendaria {quantidade}")));
+
+        Order created = OrderManager.createOrderWithItems(
+                "PlayerCarrinho", "Carrinho (3 itens)", 39.99f, pixData, items);
+        assertNotNull(created);
+        assertEquals(2, OrderManager.getOrderItems(created.getId()).size());
+
+        OrderManager.shutdown();
+        initSqlitePool(sqliteFile);
+
+        List<OrderItem> restored = OrderManager.getOrderItems(created.getId());
+        assertEquals(2, restored.size());
+        assertEquals("VIP Ouro", restored.get(0).getProduct());
+        assertEquals(2, restored.get(0).getQuantity());
+        assertEquals(12.50f, restored.get(0).getUnitPrice(), 0.001f);
+        assertEquals("lp user {player} parent add vip_ouro", restored.get(0).getCommands().get(0));
+        assertEquals("Chave Lendaria", restored.get(1).getProduct());
+        assertEquals(1, restored.get(1).getQuantity());
+        assertEquals("crate key give {player} lendaria {quantidade}",
+                restored.get(1).getCommands().get(0));
+        assertEquals(39.99f, OrderManager.getOrderById(created.getId()).getPrice(), 0.001f);
     }
 
     @Test

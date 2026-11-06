@@ -8,6 +8,7 @@ import org.bukkit.plugin.java.JavaPlugin;
 import org.bukkit.scheduler.BukkitRunnable;
 import org.bukkit.scheduler.BukkitTask;
 
+import io.github.warleysr.autopix.cart.CartManager;
 import io.github.warleysr.autopix.commands.APMenuCommand;
 import io.github.warleysr.autopix.commands.AutoPixCommand;
 import io.github.warleysr.autopix.expansion.AutoPixExpansion;
@@ -57,6 +58,7 @@ public class AutoPix extends JavaPlugin {
         VALIDATE_TASK = null;
         MAPS_TASK = null;
         HOLOGRAM_TASK = null;
+        CartManager.clearAll();
         OrderManager.shutdown();
         instance = null;
     }

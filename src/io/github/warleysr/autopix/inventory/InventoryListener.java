@@ -32,13 +32,18 @@ import org.bukkit.scheduler.BukkitRunnable;
 
 import io.github.warleysr.autopix.AutoPix;
 import io.github.warleysr.autopix.MSG;
+import io.github.warleysr.autopix.api.AutoPixAPI;
+import io.github.warleysr.autopix.cart.CartManager;
 import io.github.warleysr.autopix.OrderManager;
 import io.github.warleysr.autopix.SoundManager;
 import io.github.warleysr.autopix.TimeManager;
 import io.github.warleysr.autopix.domain.Order;
 import io.github.warleysr.autopix.domain.OrderProduct;
+import io.github.warleysr.autopix.domain.OrderItem;
+import io.github.warleysr.autopix.domain.CartItem;
 import io.github.warleysr.autopix.domain.PixData;
 import io.github.warleysr.autopix.events.AutoPixEventDispatcher;
+import io.github.warleysr.autopix.events.CheckoutFailedEvent;
 import io.github.warleysr.autopix.events.OrderCreatedEvent;
 import io.github.warleysr.autopix.events.PaymentCancelledEvent;
 import io.github.warleysr.autopix.mercadopago.MercadoPagoAPI;
@@ -53,6 +58,7 @@ public class InventoryListener implements Listener {
     private static final Map<String, String> APPLIED_COUPON_NAME = new ConcurrentHashMap<>();
     private static final Map<String, Integer> APPLIED_COUPON_PCT = new ConcurrentHashMap<>();
     private static final Set<String> SET_DISCOUNT = ConcurrentHashMap.newKeySet();
+    private static final Set<String> SET_CART_COUPON = ConcurrentHashMap.newKeySet();
     private static final Map<String, Long> LAST_CLICK_MS = new ConcurrentHashMap<>();
 
     private static final DateTimeFormatter COUPON_DATE_FORMAT = DateTimeFormatter.ofPattern("dd/MM/yyyy");
@@ -74,6 +80,8 @@ public class InventoryListener implements Listener {
                 ? apHolder.getMenuName()
                 : InventoryManager.getMenuByTitle(e.getView().getTitle());
 
+        boolean isCartMenu = apHolder != null
+                && apHolder.getMenuType() == AutoPixInventoryHolder.MenuType.CART;
         boolean isConfirmMenu = (apHolder != null && apHolder.getMenuType() == AutoPixInventoryHolder.MenuType.CONFIRM)
                 || e.getView().getTitle().equals(InventoryManager.getConfirmTitle());
 
@@ -90,19 +98,64 @@ public class InventoryListener implements Listener {
                 InventoryManager.openHistoryMenu(p);
                 return;
             }
+            if (InventoryManager.isCartButton(menu, e.getSlot())) {
+                InventoryManager.openCartMenu(p);
+                return;
+            }
 
             final OrderProduct op = InventoryManager.getOrderProduct(menu, e.getSlot());
             if (op == null) return;
 
-            BUYING_MENU.put(playerKey, menu);
-            BUYING_SLOT.put(playerKey, e.getSlot());
-            DISCOUNT_PRICES.remove(playerKey);
-            APPLIED_COUPON_NAME.remove(playerKey);
-            APPLIED_COUPON_PCT.remove(playerKey);
-            SET_DISCOUNT.remove(playerKey);
-
+            if (!CartManager.add(p, menu, e.getSlot(), 1)) {
+                p.sendMessage("§b[AutoPix] §cNão foi possível adicionar este produto ao carrinho.");
+                SoundManager.play(p, SoundManager.PAYMENT_REJECTED);
+                return;
+            }
             SoundManager.play(p, SoundManager.SELECT_PRODUCT);
-            InventoryManager.openConfirmation(p, op, op.getPrice(), null, 0);
+            p.sendMessage("§b[AutoPix] §a" + op.getProduct()
+                    + " §7foi adicionado ao carrinho. §e/pix carrinho");
+        } else if (isCartMenu) {
+            e.setCancelled(true);
+            if (e.getClickedInventory() == null || !e.getClickedInventory().equals(topInv)) return;
+            if (e.getCurrentItem() == null || e.getCurrentItem().getType() == Material.AIR) return;
+            if (isClickDebounced(playerKey)) return;
+
+            if (e.getSlot() == 45) {
+                InventoryManager.openMenu(p, "principal");
+                return;
+            }
+            if (e.getSlot() == 47) {
+                p.closeInventory();
+                SET_CART_COUPON.add(playerKey);
+                MSG.sendMessage(p, "inserir-cupom");
+                return;
+            }
+            if (e.getSlot() == 49) {
+                CartManager.clear(p);
+                InventoryManager.openCartMenu(p);
+                SoundManager.play(p, SoundManager.PAYMENT_CANCELLED);
+                return;
+            }
+            if (e.getSlot() == 53) {
+                if (!AutoPixAPI.checkout(p, true)) {
+                    SoundManager.play(p, SoundManager.PAYMENT_REJECTED);
+                }
+                return;
+            }
+
+            String cartKey = apHolder != null ? apHolder.getCartEntry(e.getSlot()) : null;
+            if (cartKey == null) return;
+            boolean changed;
+            if (e.isShiftClick() && e.isRightClick()) {
+                changed = CartManager.remove(p, cartKey);
+            } else if (e.isRightClick()) {
+                changed = CartManager.changeQuantity(p, cartKey, -1);
+            } else if (e.isLeftClick()) {
+                changed = CartManager.changeQuantity(p, cartKey, 1);
+            } else {
+                changed = false;
+            }
+            if (changed) InventoryManager.openCartMenu(p);
         } else if (isConfirmMenu) {
             e.setCancelled(true);
             if (e.getClickedInventory() == null || !e.getClickedInventory().equals(topInv)) return;
@@ -304,6 +357,22 @@ public class InventoryListener implements Listener {
         }
     }
 
+    @EventHandler
+    public void onCheckoutFailed(CheckoutFailedEvent event) {
+        Player player = Bukkit.getPlayer(event.getPlayerUniqueId());
+        if (player == null || !player.isOnline()) {
+            player = Bukkit.getPlayerExact(event.getPlayerName());
+        }
+        if (player == null || !player.isOnline()) return;
+
+        if ("pending_order".equalsIgnoreCase(event.getReason())) {
+            MSG.sendMessage(player, "cancelar-primeiro");
+        } else {
+            MSG.sendMessage(player, "erro");
+        }
+        SoundManager.play(player, SoundManager.CONNECTION_ERROR);
+    }
+
     private static boolean isClickDebounced(String playerKey) {
         long now = System.currentTimeMillis();
         Long last = LAST_CLICK_MS.get(playerKey);
@@ -364,7 +433,11 @@ public class InventoryListener implements Listener {
                     return;
                 }
 
-                OrderProduct op = InventoryManager.getProductByOrder(order);
+                List<OrderItem> savedItems = OrderManager.getOrderItems(order.getId());
+                OrderProduct op = savedItems.isEmpty()
+                        ? InventoryManager.getProductByOrder(order)
+                        : new OrderProduct(order.getProduct(), order.getPrice(), null,
+                                java.util.Collections.emptyList(), java.util.Collections.emptyList());
                 if (op == null) return;
 
                 PixData pd = OrderManager.getPixData(order);
@@ -408,6 +481,7 @@ public class InventoryListener implements Listener {
         String playerKey = p.getName().toLowerCase(Locale.ROOT);
         OrderManager.markPlayerOffline(p.getName());
         SET_DISCOUNT.remove(playerKey);
+        SET_CART_COUPON.remove(playerKey);
         LAST_CLICK_MS.remove(playerKey);
     }
 
@@ -417,6 +491,73 @@ public class InventoryListener implements Listener {
         if (e.isCancelled()) return;
         Player p = e.getPlayer();
         String playerKey = p.getName().toLowerCase(Locale.ROOT);
+
+        if (SET_CART_COUPON.contains(playerKey)) {
+            e.setCancelled(true);
+            String rawCoupon = e.getMessage().trim();
+            if (rawCoupon.equalsIgnoreCase("cancelar")) {
+                SET_CART_COUPON.remove(playerKey);
+                MSG.sendMessage(p, "compra-cancelada");
+                SoundManager.play(p, SoundManager.PAYMENT_CANCELLED);
+                return;
+            }
+
+            FileConfiguration cfg = AutoPix.getInstance().getConfig();
+            String coupon = findCouponKeyIgnoreCase(cfg, rawCoupon);
+            if (coupon == null) {
+                MSG.sendMessage(p, "cupom-invalido");
+                SoundManager.play(p, SoundManager.PAYMENT_REJECTED);
+                return;
+            }
+
+            List<CartItem> cartItems = CartManager.getItems(p);
+            if (cartItems.isEmpty()) {
+                SET_CART_COUPON.remove(playerKey);
+                MSG.sendMessage(p, "compra-cancelada");
+                return;
+            }
+
+            if (cfg.isSet("cupons." + coupon + ".validade")) {
+                String expire = cfg.getString("cupons." + coupon + ".validade", "").trim();
+                if (!expire.isEmpty()) {
+                    try {
+                        LocalDate expireDate = LocalDate.parse(expire, COUPON_DATE_FORMAT);
+                        if (LocalDate.now().isAfter(expireDate)) {
+                            MSG.sendMessage(p, "cupom-expirado");
+                            SoundManager.play(p, SoundManager.PAYMENT_REJECTED);
+                            return;
+                        }
+                    } catch (DateTimeParseException ex) {
+                        AutoPix.getInstance().getLogger().warning("Data de validade invalida no cupom "
+                                + coupon + ": " + expire);
+                    }
+                }
+            }
+
+            List<String> allowed = cfg.getStringList("cupons." + coupon + ".itens");
+            boolean appliesToAll = !allowed.isEmpty();
+            for (CartItem item : cartItems) {
+                if (!isProductAllowedForCoupon(allowed, item.getProduct())) {
+                    appliesToAll = false;
+                    break;
+                }
+            }
+            if (!appliesToAll) {
+                MSG.sendMessage(p, "cupom-nao-aplicavel");
+                SoundManager.play(p, SoundManager.PAYMENT_REJECTED);
+                return;
+            }
+
+            int discount = Math.max(1, Math.min(99, cfg.getInt("cupons." + coupon + ".porcentagem", 0)));
+            CartManager.applyDiscount(p, coupon, discount);
+            SET_CART_COUPON.remove(playerKey);
+            p.sendMessage("§b[AutoPix] §aCupom " + coupon + " aplicado: -" + discount
+                    + "%. Total: §fR$ " + String.format(Locale.ROOT, "%.2f",
+                    CartManager.getTotal(p).doubleValue()).replace('.', ','));
+            SoundManager.play(p, SoundManager.CONFIRM_PURCHASE);
+            Bukkit.getScheduler().runTask(AutoPix.getInstance(), () -> InventoryManager.openCartMenu(p));
+            return;
+        }
 
         if (!SET_DISCOUNT.contains(playerKey)) return;
 

@@ -42,6 +42,9 @@ import io.github.warleysr.autopix.OrderManager;
 import io.github.warleysr.autopix.SoundManager;
 import io.github.warleysr.autopix.domain.Order;
 import io.github.warleysr.autopix.domain.OrderProduct;
+import io.github.warleysr.autopix.domain.CartItem;
+import io.github.warleysr.autopix.domain.OrderItem;
+import io.github.warleysr.autopix.cart.CartManager;
 import io.github.warleysr.autopix.domain.PixData;
 import io.github.warleysr.autopix.qrcode.ImageCreator;
 
@@ -65,6 +68,7 @@ public class InventoryManager {
     private static volatile ItemStack INFO;
 
     private static final Map<String, Map<Integer, OrderProduct>> PRODUCTS = new ConcurrentHashMap<>();
+    private static final Map<String, Integer> CART_BUTTON_SLOTS = new ConcurrentHashMap<>();
     private static final DateTimeFormatter MAP_DATE_FORMAT =
             DateTimeFormatter.ofPattern("dd/MM/yyyy '\u00e0s' HH:mm").withZone(ZoneId.systemDefault());
     private static final DateTimeFormatter SHORT_DATE_FORMAT =
@@ -74,6 +78,8 @@ public class InventoryManager {
         MENUS.clear();
         MENUS_TITLES.clear();
         PRODUCTS.clear();
+        CART_BUTTON_SLOTS.clear();
+        historyButtonSlot = -1;
 
         FileConfiguration cfg = ap.getConfig();
         ConfigurationSection menuSection = cfg.getConfigurationSection("menu");
@@ -115,13 +121,28 @@ public class InventoryManager {
                     }
                 }
 
+                int hSlot = -1;
                 if (cfg.isConfigurationSection(menuPath + ".historico")) {
-                    int hSlot = cfg.getInt(menuPath + ".historico.slot", size) - 1;
+                    hSlot = cfg.getInt(menuPath + ".historico.slot", size) - 1;
                     if (hSlot >= 0 && hSlot < size) {
                         historyButtonSlot = hSlot;
                         historyButtonTemplate = loadItem(cfg, menuPath + ".historico.icone", 0);
                         inv.setItem(hSlot, historyButtonTemplate);
                     }
+                }
+
+                int cartSlot = -1;
+                for (int candidate = size - 1; candidate >= 0; candidate--) {
+                    if (menuProducts.containsKey(candidate) || candidate == hSlot) continue;
+                    cartSlot = candidate;
+                    break;
+                }
+                if (cartSlot >= 0) {
+                    ItemStack cartButton = createSimpleItem(Material.CHEST, "§6§lMeu carrinho",
+                            Arrays.asList("§7Adicione produtos à compra", "§7e finalize tudo em um PIX só.", " ",
+                                    "§eClique para abrir o carrinho."));
+                    inv.setItem(cartSlot, cartButton);
+                    CART_BUTTON_SLOTS.put(menu, cartSlot);
                 }
 
                 MENUS.put(menu, inv);
@@ -512,6 +533,82 @@ public class InventoryManager {
         return historyButtonSlot;
     }
 
+    public static boolean isCartButton(String menu, int slot) {
+        if (menu == null) return false;
+        Integer configured = CART_BUTTON_SLOTS.get(menu.toLowerCase(Locale.ROOT));
+        return configured != null && configured == slot;
+    }
+
+    public static void openCartMenu(Player p) {
+        if (p == null || !p.isOnline()) return;
+        AutoPix plugin = AutoPix.getInstance();
+        if (plugin == null || !plugin.isEnabled()) return;
+
+        String title = "§8§lCarrinho de compras";
+        AutoPixInventoryHolder holder = new AutoPixInventoryHolder(
+                AutoPixInventoryHolder.MenuType.CART, "carrinho", p.getName());
+        Inventory inv = Bukkit.createInventory(holder, 54, title);
+        holder.setInventory(inv);
+
+        if (plugin.getConfig().getBoolean("menu.carrinho.preencher-fundo", true)) {
+            fillEmptySlots(inv, createFillerPane("BLACK_STAINED_GLASS_PANE"));
+        }
+
+        List<CartItem> items = CartManager.getItems(p);
+        if (items.isEmpty()) {
+            inv.setItem(22, createSimpleItem(Material.BARRIER, "§cCarrinho vazio",
+                    Arrays.asList("§7Volte à loja e clique nos", "§7produtos que deseja comprar.")));
+        } else {
+            int slot = 0;
+            for (CartItem cartItem : items) {
+                if (slot >= 45) break;
+                ItemStack display = cartItem.getIcon();
+                if (display == null) display = new ItemStack(Material.CHEST);
+                display.setAmount(Math.max(1, Math.min(display.getMaxStackSize(), cartItem.getQuantity())));
+                ItemMeta meta = display.getItemMeta();
+                if (meta != null) {
+                    List<String> lore = meta.hasLore()
+                            ? new ArrayList<>(meta.getLore()) : new ArrayList<>();
+                    lore.add(" ");
+                    lore.add("§7Quantidade: §f" + cartItem.getQuantity());
+                    lore.add("§7Valor unitário: §fR$ " + formatPrice(cartItem.getUnitPrice()));
+                    lore.add("§7Subtotal: §aR$ " + formatPrice(cartItem.getLineTotal()));
+                    lore.add(" ");
+                    lore.add("§aClique esquerdo: §f+1");
+                    lore.add("§eClique direito: §f-1");
+                    lore.add("§cShift + direito: §fRemover");
+                    meta.setLore(lore);
+                    display.setItemMeta(meta);
+                }
+                inv.setItem(slot, display);
+                holder.setCartEntry(slot, cartItem.getKey());
+                slot++;
+            }
+        }
+
+        inv.setItem(45, createSimpleItem(Material.ARROW, "§eVoltar à loja",
+                Collections.singletonList("§7Retornar aos produtos.")));
+        inv.setItem(47, createSimpleItem(Material.NAME_TAG, "§bAplicar cupom",
+                Collections.singletonList("§7Digite o cupom no chat.")));
+        inv.setItem(49, createSimpleItem(Material.BARRIER, "§cLimpar carrinho",
+                Collections.singletonList("§7Remove todos os itens.")));
+        List<String> totalLore = new ArrayList<>();
+        totalLore.add("§7Itens: §f" + CartManager.getItemCount(p));
+        totalLore.add("§7Subtotal: §fR$ " + formatPrice(CartManager.getSubtotal(p).doubleValue()));
+        if (CartManager.getDiscountPercent(p) > 0) {
+            totalLore.add("§7Cupom: §a" + CartManager.getCouponName(p)
+                    + " (-" + CartManager.getDiscountPercent(p) + "%)");
+        }
+        totalLore.add("§7Total: §a§lR$ " + formatPrice(CartManager.getTotal(p).doubleValue()));
+        inv.setItem(50, createSimpleItem(Material.GOLD_INGOT, "§6§lResumo da compra", totalLore));
+        inv.setItem(53, createSimpleItem(Material.EMERALD_BLOCK, "§a§lFinalizar compra",
+                Arrays.asList("§7Gerar um único PIX para", "§7todos os itens do carrinho.", " ",
+                        "§eClique para continuar.")));
+
+        p.openInventory(inv);
+        SoundManager.play(p, SoundManager.OPEN_MENU);
+    }
+
     public static OrderProduct getOrderProduct(String menu, int slot) {
         if (menu == null) return null;
         Map<Integer, OrderProduct> map = PRODUCTS.get(menu.toLowerCase(Locale.ROOT));
@@ -721,7 +818,11 @@ public class InventoryManager {
         AutoPix plugin = AutoPix.getInstance();
         if (plugin == null) return;
 
-        OrderProduct op = getProductByOrder(order);
+        List<OrderItem> savedItems = OrderManager.getOrderItems(order.getId());
+        OrderProduct op = savedItems.isEmpty()
+                ? getProductByOrder(order)
+                : new OrderProduct(order.getProduct(), order.getPrice(), null,
+                        Collections.emptyList(), Collections.emptyList());
         if (op == null) return;
 
         Bukkit.getScheduler().runTaskAsynchronously(plugin, () -> {

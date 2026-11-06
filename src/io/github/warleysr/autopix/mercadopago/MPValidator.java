@@ -18,6 +18,7 @@ import io.github.warleysr.autopix.OrderManager;
 import io.github.warleysr.autopix.SoundManager;
 import io.github.warleysr.autopix.domain.Order;
 import io.github.warleysr.autopix.domain.OrderProduct;
+import io.github.warleysr.autopix.domain.OrderItem;
 import io.github.warleysr.autopix.inventory.InventoryManager;
 
 public class MPValidator {
@@ -122,13 +123,20 @@ public class MPValidator {
                         // Automatic PIX orders already have a Mercado Pago payment ID;
                         // manual QR orders are the ones without a pix_data row.
                         if (OrderManager.getPixData(order) != null) continue;
-                        OrderProduct op = InventoryManager.getProductByOrder(order);
-                        if (op == null) continue;
+                        List<OrderItem> orderItems = OrderManager.getOrderItems(order.getId());
+                        OrderProduct op = orderItems.isEmpty()
+                                ? InventoryManager.getProductByOrder(order) : null;
+                        if (orderItems.isEmpty() && op == null) continue;
                         if (OrderManager.toCents(order.getPrice()) != OrderManager.toCents(paid)) continue;
 
                         if (OrderManager.approveManualOrder(order, normalizedTxId)) {
-                            OrderManager.deliverApprovedOrderOnMainThread(
-                                    ap, order, op, paymentId, normalizedTxId);
+                            if (orderItems.isEmpty()) {
+                                OrderManager.deliverApprovedOrderOnMainThread(
+                                        ap, order, op, paymentId, normalizedTxId);
+                            } else {
+                                OrderManager.deliverApprovedOrderOnMainThread(
+                                        ap, order, orderItems, paymentId, normalizedTxId);
+                            }
                         } else {
                             MSG.sendMessage(p, "erro-validar");
                             SoundManager.play(p, SoundManager.CONNECTION_ERROR);
