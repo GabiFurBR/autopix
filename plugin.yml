@@ -6,7 +6,7 @@ api-version: 1.13
 softdepend: [PlaceholderAPI, Skript]
 commands:
   autopix:
-    description: Gerencia e valida transacoes realizadas por PIX
+    description: Gerencia loja, carrinho e transacoes realizadas por PIX
     aliases: [ap, pix]
   autopixmenu:
     description: Abre o menu de itens disponivel para compra por PIX

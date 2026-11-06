@@ -1,6 +1,11 @@
 package io.github.warleysr.autopix.events;
 
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
 import java.util.UUID;
+
+import io.github.warleysr.autopix.domain.OrderItem;
 
 import org.bukkit.Bukkit;
 import org.bukkit.entity.Player;
@@ -19,10 +24,18 @@ public class PaymentApprovedEvent extends Event {
     private final String paymentId;
     private final String transactionId;
     private final String status;
+    private final List<OrderItem> items;
 
     public PaymentApprovedEvent(int orderId, String playerName, UUID playerUniqueId,
                                 String product, double amount, String paymentId,
                                 String transactionId) {
+        this(orderId, playerName, playerUniqueId, product, amount, paymentId,
+                transactionId, Collections.emptyList());
+    }
+
+    public PaymentApprovedEvent(int orderId, String playerName, UUID playerUniqueId,
+                                String product, double amount, String paymentId,
+                                String transactionId, List<OrderItem> items) {
         super(false);
         this.orderId = orderId;
         this.playerName = playerName;
@@ -32,6 +45,8 @@ public class PaymentApprovedEvent extends Event {
         this.paymentId = paymentId;
         this.transactionId = transactionId;
         this.status = "approved";
+        this.items = items == null ? Collections.emptyList()
+                : Collections.unmodifiableList(new ArrayList<>(items));
     }
 
     public int getOrderId() {
@@ -73,6 +88,11 @@ public class PaymentApprovedEvent extends Event {
 
     public String getStatus() {
         return status;
+    }
+
+    /** Immutable snapshot of the products delivered by this payment. */
+    public List<OrderItem> getItems() {
+        return items;
     }
 
     @Override

@@ -32,11 +32,14 @@ import org.bukkit.configuration.file.FileConfiguration;
 import org.bukkit.entity.Player;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.scheduler.BukkitRunnable;
+import org.json.simple.JSONArray;
+import org.json.simple.parser.JSONParser;
 
 import io.github.warleysr.autopix.discord.DiscordNotifier;
 import io.github.warleysr.autopix.domain.DonorInfo;
 import io.github.warleysr.autopix.domain.Order;
 import io.github.warleysr.autopix.domain.OrderProduct;
+import io.github.warleysr.autopix.domain.OrderItem;
 import io.github.warleysr.autopix.domain.PaymentInfo;
 import io.github.warleysr.autopix.domain.PixData;
 import io.github.warleysr.autopix.events.AutoPixEventDispatcher;
@@ -215,6 +218,10 @@ public class OrderManager {
             statement.executeUpdate("CREATE TABLE IF NOT EXISTS autopix_deliveries "
                     + "(order_id INTEGER PRIMARY KEY, status VARCHAR(32) NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, "
                     + "updated_at TIMESTAMP NOT NULL, last_error TEXT NULL);");
+            statement.executeUpdate("CREATE TABLE IF NOT EXISTS autopix_order_items "
+                    + "(order_id INTEGER NOT NULL, item_index INTEGER NOT NULL, product VARCHAR(128) NOT NULL, "
+                    + "quantity INTEGER NOT NULL, unit_price DECIMAL(10, 2) NOT NULL, "
+                    + "pre_commands TEXT NOT NULL, commands TEXT NOT NULL, PRIMARY KEY (order_id, item_index));");
             ensureSchemaUpgraded(statement, dbType);
         }
     }
@@ -329,18 +336,32 @@ public class OrderManager {
     }
 
     public static Order createOrderWithPixData(String playerName, String product, float price, PixData pixData) {
-        if (playerName == null || product == null) return null;
+        return createOrderWithItems(playerName, product, price, pixData, null);
+    }
+
+    /**
+     * Creates an order, its optional Mercado Pago record and all product snapshots
+     * in one database transaction.
+     */
+    public static Order createOrderWithItems(String playerName, String product, float price,
+                                             PixData pixData, List<OrderItem> items) {
+        if (playerName == null || product == null || product.trim().isEmpty()) return null;
         float roundedPrice = roundPrice(price);
+        if (roundedPrice < 0.01f) return null;
         Timestamp created = Timestamp.from(Instant.now());
         String insertOrderSql = "INSERT INTO autopix_orders (player, product, price, created) VALUES (?, ?, ?, ?);";
         String insertPixSql = "INSERT INTO autopix_pix_data (payment_id, order_id, status, qr_code) VALUES (?, ?, ?, ?);";
+        String insertItemSql = "INSERT INTO autopix_order_items "
+                + "(order_id, item_index, product, quantity, unit_price, pre_commands, commands) "
+                + "VALUES (?, ?, ?, ?, ?, ?, ?);";
 
         try (Connection connection = getConnection()) {
             connection.setAutoCommit(false);
             try (PreparedStatement orderStmt = prepareInsertIdStatement(connection, insertOrderSql)) {
                 orderStmt.setString(1, playerName);
-                orderStmt.setString(2, product);
-                orderStmt.setBigDecimal(3, BigDecimal.valueOf(roundedPrice).setScale(2, RoundingMode.HALF_UP));
+                orderStmt.setString(2, product.length() > 64 ? product.substring(0, 64) : product);
+                orderStmt.setBigDecimal(3, BigDecimal.valueOf(Double.parseDouble(Float.toString(roundedPrice)))
+                        .setScale(2, RoundingMode.HALF_UP));
                 orderStmt.setTimestamp(4, created);
                 if (orderStmt.executeUpdate() == 0) {
                     connection.rollback();
@@ -373,6 +394,25 @@ public class OrderManager {
                     }
                 }
 
+                if (items != null && !items.isEmpty()) {
+                    try (PreparedStatement itemStmt = connection.prepareStatement(insertItemSql)) {
+                        int index = 0;
+                        for (OrderItem item : items) {
+                            itemStmt.setInt(1, orderId);
+                            itemStmt.setInt(2, index++);
+                            itemStmt.setString(3, item.getProduct());
+                            itemStmt.setInt(4, item.getQuantity());
+                            itemStmt.setBigDecimal(5, BigDecimal.valueOf(
+                                    Double.parseDouble(Float.toString(item.getUnitPrice())))
+                                    .setScale(2, RoundingMode.HALF_UP));
+                            itemStmt.setString(6, encodeStringList(item.getPreCommands()));
+                            itemStmt.setString(7, encodeStringList(item.getCommands()));
+                            itemStmt.addBatch();
+                        }
+                        itemStmt.executeBatch();
+                    }
+                }
+
                 connection.commit();
                 return order;
             } catch (SQLException exception) {
@@ -385,6 +425,58 @@ public class OrderManager {
             logSqlError("Erro ao criar pedido no banco de dados", exception);
             return null;
         }
+    }
+
+    private static String encodeStringList(List<String> values) {
+        JSONArray array = new JSONArray();
+        if (values != null) {
+            for (String value : values) {
+                if (value != null) array.add(value);
+            }
+        }
+        return array.toJSONString();
+    }
+
+    private static List<String> decodeStringList(String json) {
+        List<String> values = new ArrayList<>();
+        if (json == null || json.trim().isEmpty()) return values;
+        try {
+            Object parsed = new JSONParser().parse(json);
+            if (parsed instanceof JSONArray) {
+                for (Object value : (JSONArray) parsed) {
+                    if (value != null) values.add(String.valueOf(value));
+                }
+            }
+        } catch (Exception exception) {
+            AutoPix instance = AutoPix.getInstance();
+            if (instance != null) {
+                instance.getLogger().warning("Snapshot de comandos de pedido invalido: " + exception.getMessage());
+            }
+        }
+        return values;
+    }
+
+    public static List<OrderItem> getOrderItems(int orderId) {
+        List<OrderItem> items = new ArrayList<>();
+        String sql = "SELECT product, quantity, unit_price, pre_commands, commands "
+                + "FROM autopix_order_items WHERE order_id = ? ORDER BY item_index ASC;";
+        try (Connection connection = getConnection();
+             PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setInt(1, orderId);
+            try (ResultSet result = statement.executeQuery()) {
+                while (result.next()) {
+                    items.add(new OrderItem(
+                            result.getString("product"),
+                            result.getInt("quantity"),
+                            roundPrice(result.getDouble("unit_price")),
+                            decodeStringList(result.getString("pre_commands")),
+                            decodeStringList(result.getString("commands"))));
+                }
+            }
+        } catch (SQLException exception) {
+            logSqlError("Erro ao consultar itens do pedido #" + orderId, exception);
+        }
+        return items;
     }
 
     private static void insertDeliveryOutbox(Connection connection, int orderId) throws SQLException {
@@ -654,8 +746,9 @@ public class OrderManager {
 
                 if (!isPlayerOnline(order.getPlayer())) continue;
 
-                OrderProduct op = InventoryManager.getProductByOrder(order);
-                if (op == null) continue;
+                List<OrderItem> orderItems = getOrderItems(order.getId());
+                OrderProduct op = orderItems.isEmpty() ? InventoryManager.getProductByOrder(order) : null;
+                if (orderItems.isEmpty() && op == null) continue;
 
                 PaymentInfo info = MercadoPagoAPI.getPayment(ap, pd.getPaymentId());
                 if (info == null || info.getStatus() == null) continue;
@@ -686,7 +779,11 @@ public class OrderManager {
 
                 if (!approvePayment(pd, order, info.getTransactionId())) continue;
 
-                deliverApprovedOrderOnMainThread(ap, order, op, pd.getPaymentId(), info.getTransactionId());
+                if (orderItems.isEmpty()) {
+                    deliverApprovedOrderOnMainThread(ap, order, op, pd.getPaymentId(), info.getTransactionId());
+                } else {
+                    deliverApprovedOrderOnMainThread(ap, order, orderItems, pd.getPaymentId(), info.getTransactionId());
+                }
             }
         } finally {
             VALIDATION_RUNNING.set(false);
@@ -817,22 +914,39 @@ public class OrderManager {
                     markDeliveryForReview(orderId, "Pedido nao encontrado ou sem aprovacao registrada.");
                     continue;
                 }
-                OrderProduct product = InventoryManager.getProductByOrder(order);
-                if (product == null) {
+                List<OrderItem> orderItems = getOrderItems(orderId);
+                OrderProduct product = orderItems.isEmpty() ? InventoryManager.getProductByOrder(order) : null;
+                if (orderItems.isEmpty() && product == null) {
                     markDeliveryForReview(orderId, "Produto nao existe mais na configuracao menu.*.produtos.");
                     ap.getLogger().warning("Entrega do pedido #" + orderId
-                            + " exige revisao: produto ausente na configuracao.");
+                            + " exige revisao: produto ausente na configuracao e snapshot inexistente.");
                     continue;
                 }
                 PixData pixData = getPixData(order);
-                deliverApprovedOrderOnMainThread(ap, order, product,
-                        pixData != null ? pixData.getPaymentId() : null, order.getTransaction());
+                if (orderItems.isEmpty()) {
+                    deliverApprovedOrderOnMainThread(ap, order, product,
+                            pixData != null ? pixData.getPaymentId() : null, order.getTransaction());
+                } else {
+                    deliverApprovedOrderOnMainThread(ap, order, orderItems,
+                            pixData != null ? pixData.getPaymentId() : null, order.getTransaction());
+                }
             }
         });
     }
 
     public static void deliverApprovedOrderOnMainThread(AutoPix ap, Order order, OrderProduct op,
                                                         String paymentId, String transactionId) {
+        deliverApprovedOrderInternal(ap, order, op, null, paymentId, transactionId);
+    }
+
+    public static void deliverApprovedOrderOnMainThread(AutoPix ap, Order order, List<OrderItem> items,
+                                                        String paymentId, String transactionId) {
+        deliverApprovedOrderInternal(ap, order, null, items, paymentId, transactionId);
+    }
+
+    private static void deliverApprovedOrderInternal(AutoPix ap, Order order, OrderProduct legacyProduct,
+                                                       List<OrderItem> orderItems, String paymentId,
+                                                       String transactionId) {
         if (ap == null || order == null) return;
         Bukkit.getScheduler().runTaskAsynchronously(ap, () -> {
             if (!claimDelivery(order.getId())) return;
@@ -885,13 +999,22 @@ public class OrderManager {
                         InventoryManager.refreshOpenInventory(p);
                     }
 
-                    if (op != null && op.getCommands() != null) {
-                        for (String command : op.getCommands()) {
-                            boolean dispatched = Bukkit.dispatchCommand(Bukkit.getConsoleSender(),
-                                    command.replace("{player}", order.getPlayer()).replace('&', '\u00a7'));
+                    if (orderItems != null && !orderItems.isEmpty()) {
+                        for (OrderItem item : orderItems) {
+                            for (String command : item.getCommands()) {
+                                String rendered = renderOrderCommand(command, order.getPlayer(), item);
+                                boolean dispatched = Bukkit.dispatchCommand(Bukkit.getConsoleSender(), rendered);
+                                if (!dispatched) {
+                                    throw new IllegalStateException("Comando de recompensa nao foi aceito: " + rendered);
+                                }
+                            }
+                        }
+                    } else if (legacyProduct != null && legacyProduct.getCommands() != null) {
+                        for (String command : legacyProduct.getCommands()) {
+                            String rendered = command.replace("{player}", order.getPlayer()).replace('&', '\u00a7');
+                            boolean dispatched = Bukkit.dispatchCommand(Bukkit.getConsoleSender(), rendered);
                             if (!dispatched) {
-                                throw new IllegalStateException("Comando de recompensa nao foi aceito: "
-                                        + command.replace("{player}", order.getPlayer()));
+                                throw new IllegalStateException("Comando de recompensa nao foi aceito: " + rendered);
                             }
                         }
                     }
@@ -899,7 +1022,8 @@ public class OrderManager {
                     AutoPixEventDispatcher.dispatch(new PaymentApprovedEvent(
                             order.getId(), order.getPlayer(),
                             p != null ? p.getUniqueId() : playerUuid,
-                            order.getProduct(), order.getPrice(), paymentId, transactionId));
+                            order.getProduct(), order.getPrice(), paymentId, transactionId,
+                            orderItems));
                     completeDeliveryAsync(ap, order.getId(), "delivered", null);
                 } catch (Exception exception) {
                     completeDeliveryAsync(ap, order.getId(), "needs_review", exception.getMessage());
@@ -908,6 +1032,14 @@ public class OrderManager {
                 }
             });
         });
+    }
+
+    private static String renderOrderCommand(String command, String playerName, OrderItem item) {
+        return command.replace("{player}", playerName)
+                .replace("{produto}", item.getProduct())
+                .replace("{quantidade}", Integer.toString(item.getQuantity()))
+                .replace("{preco}", String.format(Locale.ROOT, "%.2f", item.getLineTotal()).replace('.', ','))
+                .replace('&', '\u00a7');
     }
 
     protected static void processOrderExpirations(AutoPix ap) {

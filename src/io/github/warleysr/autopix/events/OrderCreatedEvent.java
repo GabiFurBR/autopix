@@ -1,6 +1,11 @@
 package io.github.warleysr.autopix.events;
 
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
 import java.util.UUID;
+
+import io.github.warleysr.autopix.domain.OrderItem;
 
 import org.bukkit.Bukkit;
 import org.bukkit.entity.Player;
@@ -19,10 +24,19 @@ public class OrderCreatedEvent extends Event {
     private final String paymentId;
     private final String status;
     private final long createdAt;
+    private final String qrCode;
+    private final List<OrderItem> items;
 
     public OrderCreatedEvent(int orderId, String playerName, UUID playerUniqueId,
                              String product, double amount, String paymentId,
                              String status, long createdAt) {
+        this(orderId, playerName, playerUniqueId, product, amount, paymentId,
+                status, createdAt, null, Collections.emptyList());
+    }
+
+    public OrderCreatedEvent(int orderId, String playerName, UUID playerUniqueId,
+                             String product, double amount, String paymentId,
+                             String status, long createdAt, String qrCode, List<OrderItem> items) {
         super(false);
         this.orderId = orderId;
         this.playerName = playerName;
@@ -32,6 +46,9 @@ public class OrderCreatedEvent extends Event {
         this.paymentId = paymentId;
         this.status = status != null ? status : "pending";
         this.createdAt = createdAt;
+        this.qrCode = qrCode;
+        this.items = items == null ? Collections.emptyList()
+                : Collections.unmodifiableList(new ArrayList<>(items));
     }
 
     public int getOrderId() {
@@ -73,6 +90,16 @@ public class OrderCreatedEvent extends Event {
 
     public long getCreatedAt() {
         return createdAt;
+    }
+
+    /** Raw PIX copy-and-paste payload. May be null when manual mode is used. */
+    public String getQrCode() {
+        return qrCode;
+    }
+
+    /** Immutable snapshot of the products in this order. */
+    public List<OrderItem> getItems() {
+        return items;
     }
 
     @Override

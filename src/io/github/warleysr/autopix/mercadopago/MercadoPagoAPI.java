@@ -17,8 +17,6 @@ import org.json.simple.JSONObject;
 import org.json.simple.parser.JSONParser;
 
 import io.github.warleysr.autopix.AutoPix;
-import io.github.warleysr.autopix.MSG;
-import io.github.warleysr.autopix.SoundManager;
 import io.github.warleysr.autopix.domain.OrderProduct;
 import io.github.warleysr.autopix.domain.PaymentInfo;
 import io.github.warleysr.autopix.domain.PixData;
@@ -57,8 +55,24 @@ public class MercadoPagoAPI {
     }
 
     public static PixData createPixPayment(AutoPix ap, Player p, OrderProduct product, float price) throws Exception {
+        if (product == null || p == null) return null;
+        return createPixPayment(ap, p.getName(), product.getProduct(), price);
+    }
+
+    public static PixData createPixPayment(AutoPix ap, Player p, String productName, float price) throws Exception {
+        return p == null ? null : createPixPayment(ap, p.getName(), productName, price);
+    }
+
+    public static PixData createPixPayment(AutoPix ap, String playerName, String productName, float price) throws Exception {
+        return createPixPayment(ap, playerName, productName, price, UUID.randomUUID().toString());
+    }
+
+    public static PixData createPixPayment(AutoPix ap, String playerName, String productName,
+                                           float price, String idempotencyKey) throws Exception {
+        if (ap == null || playerName == null || productName == null || productName.trim().isEmpty()
+                || !Float.isFinite(price) || price < 0.01f) return null;
         String notificationUrl = ap.getConfig().getString("automatico.notificacoes", null);
-        String jsonBody = buildCreatePaymentJson(p.getName(), product.getProduct(), price, notificationUrl);
+        String jsonBody = buildCreatePaymentJson(playerName, productName, price, notificationUrl);
 
         HttpURLConnection connection = (HttpURLConnection) URI.create(API_URL).toURL().openConnection();
         try {
@@ -69,7 +83,9 @@ public class MercadoPagoAPI {
             connection.setRequestProperty("Content-Type", "application/json; charset=UTF-8");
             connection.setRequestProperty("Accept", "application/json");
             connection.setRequestProperty("Authorization", "Bearer " + ap.getConfig().getString("token-mp", "").trim());
-            connection.setRequestProperty("X-Idempotency-Key", UUID.randomUUID().toString());
+            String safeIdempotencyKey = idempotencyKey != null && !idempotencyKey.trim().isEmpty()
+                    ? idempotencyKey.trim() : UUID.randomUUID().toString();
+            connection.setRequestProperty("X-Idempotency-Key", safeIdempotencyKey);
 
             try (DataOutputStream outputStream = new DataOutputStream(connection.getOutputStream())) {
                 outputStream.write(jsonBody.getBytes(StandardCharsets.UTF_8));
@@ -83,8 +99,6 @@ public class MercadoPagoAPI {
                 String apiError = extractSafeErrorSummary(responseBody);
                 ap.getLogger().warning("Falha ao criar cobranca PIX no Mercado Pago (HTTP "
                         + statusCode + "): " + apiError);
-                MSG.sendMessage(p, "erro-validar");
-                SoundManager.play(p, SoundManager.CONNECTION_ERROR);
                 return null;
             }
 

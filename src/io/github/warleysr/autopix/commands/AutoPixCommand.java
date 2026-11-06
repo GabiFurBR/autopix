@@ -73,6 +73,18 @@ public class AutoPixCommand implements CommandExecutor, TabCompleter {
                 }
                 InventoryManager.openMenu(p, "principal");
                 return true;
+            } else if (sub.equals("carrinho") || sub.equals("cart")) {
+                if (!(sender instanceof Player)) {
+                    MSG.sendMessage(sender, "in-game");
+                    return false;
+                }
+                Player p = (Player) sender;
+                if (!p.hasPermission("autopix.use")) {
+                    MSG.sendMessage(p, "sem-permissao");
+                    return false;
+                }
+                InventoryManager.openCartMenu(p);
+                return true;
             } else if (sub.equals("lista")) {
                 if (args.length == 1) {
                     if (!(sender instanceof Player)) {
@@ -279,6 +291,7 @@ public class AutoPixCommand implements CommandExecutor, TabCompleter {
             subcommands.add("info");
             subcommands.add("lista");
             subcommands.add("historico");
+            subcommands.add("carrinho");
             subcommands.add("cancelar");
             subcommands.add("top");
             if (!AutoPix.getInstance().getConfig().getBoolean("automatico.ativado", true)) {
