@@ -1,33 +1,36 @@
-# Token do MercadoPago para consultar transacoes
+# Token do MercadoPago para consultar transacoes.
+# Nunca publique este token em repositorios ou prints.
 token-mp: 'SEU TOKEN DO MERCADO PAGO'
 
-# Configuracoes do PIX
 pix:
-  # CPF, CNPJ, Celular com +55 e DDD, email ou aleatoria 
   chave: 'SUA CHAVE PIX'
-  # Nome do beneficiario com ate 25 caracteres
   nome: 'Fulano de Tal'
-  # Ative essa opcao para receber a payload dos codigos gerados
   debug: false
-  # Desative essa opcao para nao enviar o mapa para o jogador no modo manual
   mapa: true
 
-# Modo de ativacao automatico
 automatico:
   ativado: true
-  # Em segundos para cada verificação. Valores muito baixos podem sobrecarregar o servidor.
-  intervalo: 10 
-  
-# Servidor MySQL para salvamento dos dados
-database:
-  type: mysql
-  db: tests
-  host: localhost
-  port: 3306
-  user: root
-  pass: admin
+  intervalo: 10
 
-# Tempo de espera para cada acao em segundos
+# Banco de dados: postgresql (Neon), mysql ou sqlite.
+# Para Neon, use o HOST com "-pooler" fornecido pelo botao Connect.
+# Nao coloque a URL completa com senha no repositorio publico.
+database:
+  type: postgresql
+  host: 'SEU_HOST_NEON_POOLER'
+  port: 5432
+  db: 'SEU_BANCO'
+  user: 'SEU_USUARIO'
+  pass: 'SUA_SENHA'
+  sslmode: require
+  channel-binding: require
+  pool:
+    maximum-size: 3
+    minimum-idle: 0
+    connection-timeout: 10000
+    idle-timeout: 60000
+    max-lifetime: 300000
+
 tempos:
   validar: 60
   lista: 30
@@ -36,25 +39,19 @@ tempos:
   cancelar: 30
   top: 30
 
-# Mapa de pagamento
 mapa:
   nome: '&aQR code de pagamento'
   descricao:
   - '&7Data: &f{data}'
   - '&7Jogador: &f{jogador}'
   - '&7Produto: &f{produto}'
-  # Tempo em MINUTOS que o jogador tem
-  # para pagar antes que o mapa seja removido
   tempo-pagar: 30
-  # Intervalo em SEGUNDOS que a verificacao ira ocorrer
   intervalo: 60
-  
-# Menus para compra de produtos por PIX
+
 menu:
   principal:
       titulo: '&9&lCompre produtos por &c&lPIX'
       tamanho: 54
-      # Lista de produtos disponiveis
       produtos:
         VIP1:
           preco: 0.23
@@ -69,7 +66,6 @@ menu:
             descricao:
             - '&7Vip por &c30 &7dias'
             - '&7Clique para comprar por &aPIX'
-  # Menu para confirmar compra
   confirmar:
     titulo: '&9&lConfirmar compra por &c&lPIX'
     tamanho: 27
@@ -89,31 +85,26 @@ menu:
         - '&7Gerar codigo &bQR &7para'
         - '&7pagar por PIX.'
     desconto:
-        slot: 14
-        icone:
-            material: paper
-            nome: '&bAplicar cupom'
-            descricao:
-            - '&7Clique para informar um cupom no chat'
+      slot: 14
+      icone:
+        material: paper
+        nome: '&bAplicar cupom'
+        descricao:
+        - '&7Clique para informar um cupom no chat'
 
-# Cadastrar cupons de desconto
 cupons:
-    desconto15:
-        porcentagem: 15
-        # (Opcional, pode ser removida) A validade considera as 0h do dia informado
-        validade: 31/12/2023
-        itens:
-        - vip1
-    
-# Som ao pagamento ser validado
+  desconto15:
+    porcentagem: 15
+    validade: 31/12/2023
+    itens:
+    - vip1
+
 som:
   ativar: true
   efeito: BLOCK_NOTE_BLOCK_BASS
 
-# Quantidade de top doadores que serão mostrados
 top-doadores: 5
 
-# Livro de ajuda com instrucoes
 info:
   titulo: '&aInfo PIX'
   autor: '&bAutoPix'
@@ -131,16 +122,16 @@ info:
     - ' '
     - '&8Com o app do seu banco scaneie e realize o pagamento.'
     3:
-    - '&8Após finalizar obtenha o ID da transacao.'
+    - '&8Apos finalizar obtenha o ID da transacao.'
     - ' '
-    - '&8Ele e mostrado no comprovante, tem &c32 &8caracteres e começa com &8a letra &c&lE&8.'
+    - '&8Ele e mostrado no comprovante, tem &c32 &8caracteres e comeca com &8a letra &c&lE&8.'
     - ' '
     - '&8Exemplo:'
     - '&7E00416968202301162037NF2oRtQ73bY'
     4:
-    - '&8Com o código em maos digite:'
+    - '&8Com o codigo em maos digite:'
     - ' '
     - ' &9/pix validar <Codigo>'
     - ' '
-    - '&8seu PIX sera validado'
-    - '&8e voce receberá seu produto.'
+    - '&8Seu PIX sera validado'
+    - '&8e voce recebera seu produto.'

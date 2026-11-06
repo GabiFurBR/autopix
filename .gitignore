@@ -1,0 +1,17 @@
+# Maven
+/target/
+
+# IDEs
+/.idea/
+/.vscode/
+*.iml
+.classpath
+.project
+.settings/
+
+# Local secrets and generated configs
+.env
+.env.*
+!.env.example
+config-local.yml
+config-private.yml

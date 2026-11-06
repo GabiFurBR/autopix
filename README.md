@@ -1,68 +1,92 @@
-# AutoPix
+# AutoPix Neon
 
- O AutoPix é um plugin Spigot que integra <b>código QR</b> PIX dentro do Minecraft e permite que os jogadores comprem itens e recebam automaticamente em questão de segundos.
+Community fork of [AutoPix](https://github.com/warleysr/autopix), originally created by [WarleySR](https://github.com/warleysr). This fork keeps the original PIX and Mercado Pago workflow and adds PostgreSQL/Neon support, pooled JDBC connections and a reproducible build.
 
-## Como funciona?
+## Current status
 
-O jogador digita `/comprarpix` e um menu será mostrado com os produtos disponíveis:
+This is a development build. It has not yet been validated against a live Neon database or a production Minecraft server. Do not use it to process real payments until the test checklist below has passed.
 
-<img src="https://i.imgur.com/JEaNamt.png" align="middle" width="350px;">
+## Features
 
-e quando ele confirmar a compra receberá nas mãos um QR code para pagar por PIX:
+- Original AutoPix menus, QR Code PIX flow and Mercado Pago integration.
+- PostgreSQL support, including Neon.
+- MySQL and SQLite modes retained.
+- HikariCP connection pool with configurable limits and idle connection retirement.
+- Existing PlaceholderAPI expansion retained.
+- Maven build targeting Paper 26.3 / Java 25.
 
-<img src="https://i.imgur.com/UqkV1n4.png" align="middle" width="250px">
+## Requirements
 
-## Modos de validação
-**Modo automático:** No modo automático o jogador só precisa aguardar a confirmação do pagamento. A cada `x` segundos 
-o plugin faz uma verificação nos status dos pedidos pendentes e ativa ao ser aprovado. Quanto menor o tempo de
-verificação mais instantânea será a confirmação, porém serão mais requisições para a API do MP, o que pode prejudicar o
-desempenho do servidor se for muito baixo.
+- Paper/Purpur 26.3 and Java 25 for this build.
+- Maven 3.9+ to compile locally.
+- PlaceholderAPI is optional at runtime; it is used for the existing AutoPix expansion.
+- A Mercado Pago access token and PIX configuration for payment processing.
 
-**Modo manual:** Após pagar pelo banco de preferência ele obtém o código do PIX e faz `/pix validar <Codigo>`. 
-A única vantagem desse modo é que não cobra taxas, pois o PIX é realizado direto para a chave configurada. Ao validar é feito
-a busca nas transações a partir do código E2E do PIX. Pode ter limitações se muitas transações forem realizadas, o mais
-recomendado é o modo automático.
+## Build
 
-Você pode configurar comandos para dar VIP, dinheiro, itens, etc.
- 
+Run `mvn clean package`.
 
-## Comandos
-Além dos comandos já mencionados o plugin conta com o comando `/pix info` que abre um livro com instruções de como validar para os seus jogadores não terem dúvidas:
+The shaded plugin JAR is generated in `target/autopix-neon-1.1.0-SNAPSHOT.jar`.
 
-<img src="https://i.imgur.com/2IOTGDy.png" align="middle" width="250px">
+GitHub Actions also builds the plugin on pushes and pull requests to `master` and `develop`. Download the artifact from the workflow run; this repository does not commit compiled JARs.
 
-Existe também o comando `/pix lista` que mostra a lista de ordens criadas pelo jogador e as informações. Para admins pode ser usado `/pix lista <Jogador>` para ver as ordens de outro jogador.
+## Neon / PostgreSQL configuration
 
-<img src="https://i.imgur.com/sEd6vXT.png" align="middle" width="400px">
+1. In the Neon Console, open **Connect** and select the branch, database and role you intend to use.
+2. Use the pooled endpoint hostname (the hostname contains `-pooler`) for a long-running game server with concurrent database operations.
+3. Copy the hostname, database, role and password into the local `plugins/AutoPix/config.yml` file.
+4. Keep `sslmode: require` and `channel-binding: require`.
+5. Use a dedicated Neon database for AutoPix rather than sharing application tables with the website.
 
-Além desses, existem os comandos:
-- `/pix reload` - Recarrega as configurações e mensagens do plugin
-- `/comprarpix <Inventario>` - Abre um inventário específico. Na config é possível criar múltiplos inventários para vender
-diferentes tipos de itens. O plugin não suporta paginação, é necessário colocar o comando em um NPC ou usar outro plugin de
-inventários que execute o comando.
+Example:
 
-## Permissões
-`autopix.use` - permite realizar compras por PIX
+```yaml
+database:
+  type: postgresql
+  host: 'ep-example-pooler.region.aws.neon.tech'
+  port: 5432
+  db: 'autopix'
+  user: 'autopix_owner'
+  pass: 'CHANGE_ME'
+  sslmode: require
+  channel-binding: require
+  pool:
+    maximum-size: 3
+    minimum-idle: 0
+    connection-timeout: 10000
+    idle-timeout: 60000
+    max-lifetime: 300000
+```
 
-`autopix.admin` - permite ver a lista de pedidos de outros jogadores e dar reload no plugin
+Never commit the real config.yml, Mercado Pago token, PIX key or database password. The repository's config.yml contains placeholders only. Rotate any credential that is accidentally published.
 
-## Outras features
-- Todas as mensagens editáveis
-- Limite de tempo entre as ações para evitar sobrecarga no servidor
-- Múltiplos menus
+### Database modes
 
-## Vídeos demonstrativos:
-https://youtu.be/vVs14RqBq3Q
+- `postgresql` (or `postgres`): PostgreSQL and Neon. Uses SSL and channel binding by default.
+- `mysql`: MySQL using the configured host, port, database, user and password.
+- `sqlite`: local `autopix.db` file in the plugin folder.
 
-https://youtu.be/38rZIy0lXbM
+The plugin creates the original `autopix_orders` and `autopix_pix_data` tables automatically. Existing MySQL/SQLite schemas are not migrated or copied into PostgreSQL. Use a fresh, dedicated Neon database for the first test.
 
-## Download e instalação
-1. Baixe a última versão em <a href="https://github.com/warleysr/autopix/releases">releases</a> e coloque na pasta `plugins` do seu servidor. 
-2. Inicie o servidor para gerar os arquivos
-3. Edite o arquivo `config.yml` colocando o Token do MercadoPago que pode ser obtido <a href="https://www.mercadopago.com.br/settings/account/credentials">aqui</a>
-4. Configure a chave PIX que receberá os pagamentos (ela deve estar vinculada a sua conta do MP)
-5. Configure também a conexão ao banco de dados 
-6. Reinicie o servidor
+## Test checklist before production
 
----
-Thanks to @rapust for creating <a href="https://github.com/rapust/QRCodeMap">QRCodeMap</a>.
+- Confirm startup creates both tables in the intended Neon database.
+- Create a test order and confirm the generated order ID is correct.
+- Generate a PIX payment and confirm its payment ID and QR data are stored.
+- Pay with a controlled low-value test and confirm the exact amount is checked.
+- Confirm the configured product commands run once after an approved payment.
+- Test pending, rejected, cancelled and expired payments.
+- Restart the server with a pending payment and verify that it remains recoverable.
+- Stop the database briefly, restore connectivity and verify that the pool recovers.
+- Confirm `/pix lista`, manual validation and top-donor placeholders still work.
+- Test the plugin with MySQL and SQLite if those modes are still required.
+
+## Integration roadmap
+
+The original product configuration executes console commands after a successful payment. This already supports command-driven rewards from LuckPerms, Essentials, Oraxen and ExecutableItems without adding hard dependencies. PlaceholderAPI support is already present in the original project.
+
+The most useful future addition is a small optional Skript bridge that exposes Bukkit events for order creation, payment approval, rejection and cancellation. DiscordSRV or DiSky can then react to those events without becoming required dependencies. FancyHolograms, TAB and other PlaceholderAPI-compatible plugins can consume AutoPix statistics. Avoid hard hooks to unrelated plugins unless a concrete feature needs them.
+
+## Credits and license
+
+This repository is a community fork. The original project and its license notices are preserved. Thanks to WarleySR for AutoPix and to the QRCodeMap contributors referenced by the original project. See [LICENSE](LICENSE).
