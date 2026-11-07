@@ -652,7 +652,54 @@ public final class SubscriptionManager {
         }
     }
 
+    /**
+     * Recovers subscription invoices whose PIX order was already approved but whose
+     * subscription transition was interrupted. Safe to run repeatedly: invoice payment
+     * confirmation is transactional and idempotent.
+     */
+    private static void reconcilePaidPendingSubscriptionInvoices() {
+        List<Integer> paidOrderIds = new ArrayList<>();
+        String sql = "SELECT i.order_id FROM autopix_subscription_invoices i "
+                + "INNER JOIN autopix_subscriptions s ON s.subscription_id = i.subscription_id "
+                + "INNER JOIN autopix_orders o ON o.id = i.order_id "
+                + "WHERE i.status = 'PENDING' AND i.order_id IS NOT NULL "
+                + "AND s.status <> 'CANCELLED' AND o.status IN ('PAID', 'DELIVERED');";
+        try (Connection connection = OrderManager.getConnection();
+             PreparedStatement stmt = connection.prepareStatement(sql);
+             ResultSet rs = stmt.executeQuery()) {
+            while (rs.next()) {
+                int orderId = rs.getInt("order_id");
+                if (orderId > 0) {
+                    paidOrderIds.add(orderId);
+                }
+            }
+        } catch (SQLException ex) {
+            logError("Erro ao procurar faturas de assinatura com pedidos ja pagos", ex);
+            return;
+        }
+
+        for (Integer orderId : paidOrderIds) {
+            Order order = OrderManager.getOrderById(orderId);
+            if (order == null || !order.isValidated()) {
+                continue;
+            }
+            SubscriptionInvoice invoice = getInvoiceByOrderId(orderId);
+            if (invoice == null || invoice.isPaid()) {
+                continue;
+            }
+            boolean reconciled = onOrderPaymentApproved(
+                    orderId, invoice.getProviderPaymentId(), order.getTransaction(), order.getTotal());
+            if (!reconciled) {
+                logError("Nao foi possivel reconciliar automaticamente a fatura "
+                        + invoice.getInvoiceId() + " da assinatura " + invoice.getSubscriptionId()
+                        + " apesar do pedido #" + orderId + " estar pago.", null);
+            }
+        }
+    }
+
     public static void processDueSubscriptions() {
+        reconcilePaidPendingSubscriptionInvoices();
+
         Instant now = Instant.now();
         List<String> dueActiveSubIds = new ArrayList<>();
 
