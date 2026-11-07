@@ -8,16 +8,83 @@ import:
     org.bukkit.entity.Player
     org.bukkit.Bukkit
 
-function executarEntregaCustomLoja(p: player, handler: text, orderId: text) :: boolean:
+function executarEntregaCustomLoja(p: player, handler: text, orderId: text, itemIndex: number, claimToken: text, orderItem: object) :: boolean:
     if {_p} is not set:
         return false
     if {_p}.isOnline() is not true:
         return false
     if {_handler} is not set:
         return false
-    if {_handler} is "":
+    if {_orderItem} is not set:
         return false
-    lojaSucesso({_p}, "Processando benefícios exclusivos da sua compra (%{_handler}%)...")
+    if {_claimToken} is not set:
+        return false
+    if {_claimToken} is "":
+        return false
+
+    set {_productId} to {_orderItem}.getProductId()
+    set {_quantity} to {_orderItem}.getQuantity()
+    if {_quantity} is not set:
+        return false
+    if {_quantity} <= 0:
+        return false
+
+    set {_unitAmount} to 0
+    if {_handler} is "gems_purchase":
+        if {_productId} is "gems_5k":
+            set {_unitAmount} to 5000
+        else if {_productId} is "gems_25k":
+            set {_unitAmount} to 25000
+        else if {_productId} is "gems_100k":
+            set {_unitAmount} to 100000
+        else:
+            return false
+    else if {_handler} is "stars_purchase":
+        if {_productId} is "stars_100":
+            set {_unitAmount} to 100
+        else if {_productId} is "stars_500":
+            set {_unitAmount} to 500
+        else:
+            return false
+    else if {_handler} is "event_coins_purchase":
+        if {_productId} is "event_coins_500":
+            set {_unitAmount} to 500
+        else if {_productId} is "event_coins_2500":
+            set {_unitAmount} to 2500
+        else:
+            return false
+    else:
+        return false
+
+    if {_unitAmount} <= 0:
+        return false
+    set {_amount} to {_unitAmount} * {_quantity}
+
+    set {_deliveryState} to {autopix::delivery::%{_orderId}%::%{_itemIndex}%::state}
+    if {_deliveryState} is "APPLIED":
+        return true
+    if {_deliveryState} is set:
+        return false
+
+    set {autopix::delivery::%{_orderId}%::%{_itemIndex}%::state} to "PROCESSING"
+    set {autopix::delivery::%{_orderId}%::%{_itemIndex}%::claim} to {_claimToken}
+    set {autopix::delivery::%{_orderId}%::%{_itemIndex}%::handler} to {_handler}
+    set {autopix::delivery::%{_orderId}%::%{_itemIndex}%::amount} to {_amount}
+
+    if {_handler} is "gems_purchase":
+        addgem({_p}, {_amount})
+        nr_reward_record({_p}, "Loja AutoPix", "%{_amount}% Gemas")
+        lojaSucesso({_p}, "Compra confirmada: &b%{_amount}% Gemas&f adicionadas à sua conta.")
+    else if {_handler} is "stars_purchase":
+        addstars({_p}, {_amount})
+        nr_reward_record({_p}, "Loja AutoPix", "%{_amount}% Estrelas")
+        lojaSucesso({_p}, "Compra confirmada: &e%{_amount}% Estrelas&f adicionadas à sua conta.")
+    else if {_handler} is "event_coins_purchase":
+        addpumpcoins({_p}, {_amount})
+        nr_reward_record({_p}, "Loja AutoPix", "%{_amount}% PumpCoins")
+        lojaSucesso({_p}, "Compra confirmada: &6%{_amount}% PumpCoins&f adicionados à sua conta.")
+
+    set {autopix::delivery::%{_orderId}%::%{_itemIndex}%::state} to "APPLIED"
     return true
 
 on "io.github.warleysr.autopix.events.PaymentApprovedEvent":
@@ -42,6 +109,7 @@ on "io.github.warleysr.autopix.events.DeliveryStartedEvent":
     set {_orderId} to event.getOrderId()
     set {_itemIndex} to event.getItemIndex()
     set {_claimToken} to event.getClaimToken()
+    set {_orderItem} to event.getOrderItem()
     if {_deliveryType} is "skript" or "hybrid":
         if {_claimToken} is not set:
             stop
@@ -53,11 +121,11 @@ on "io.github.warleysr.autopix.events.DeliveryStartedEvent":
         if {_p}.isOnline() is not true:
             AutoPixAPI.failCustomDelivery({_orderId}, "%{_itemIndex}%", {_claimToken}, "Jogador offline durante entrega Skript.", true)
             stop
-        set {_ok} to executarEntregaCustomLoja({_p}, {_handler}, {_orderId})
+        set {_ok} to executarEntregaCustomLoja({_p}, {_handler}, "%{_orderId}%", {_itemIndex}, {_claimToken}, {_orderItem})
         if {_ok} is true:
             AutoPixAPI.confirmCustomDelivery({_orderId}, "%{_itemIndex}%", {_claimToken})
         else:
-            AutoPixAPI.failCustomDelivery({_orderId}, "%{_itemIndex}%", {_claimToken}, "Falha ao executar handler Skript %{_handler}%.", true)
+            AutoPixAPI.failCustomDelivery({_orderId}, "%{_itemIndex}%", {_claimToken}, "Handler Skript inválido, incompleto ou em estado de revisão: %{_handler}% / %{_orderItem}.getProductId()%", false)
 
 on "io.github.warleysr.autopix.events.DeliveryCompletedEvent":
     set {_p} to event.getPlayer()
