@@ -285,6 +285,28 @@ public final class DatabaseMigrationRunner {
                 + "UNIQUE (order_id, item_index)"
                 + ");";
 
+        // MySQL commits DDL implicitly. If the process stops after renaming the legacy table
+        // or halfway through copying rows, JDBC rollback cannot restore the previous state.
+        // Recover that intermediate state before starting the migration again.
+        boolean hasLegacyBackup = tableExists(conn, "autopix_deliveries_legacy_backup");
+        boolean hasCurrentTable = tableExists(conn, "autopix_deliveries");
+        if (hasLegacyBackup && !hasCurrentTable) {
+            try (Statement stmt = conn.createStatement()) {
+                stmt.executeUpdate("ALTER TABLE autopix_deliveries_legacy_backup RENAME TO autopix_deliveries;");
+            }
+            hasCurrentTable = true;
+        } else if (hasLegacyBackup) {
+            if (!columnExists(conn, "autopix_deliveries", "delivery_id")
+                    || isPrimaryKeyColumn(conn, "autopix_deliveries", "order_id")) {
+                throw new SQLException("Estado de migracao V4 inconsistente: tabela atual e backup legado coexistem, mas a tabela atual nao possui o esquema multi-item. Backup preservado para recuperacao manual.");
+            }
+            List<LegacyDeliveryRow> backupRows = readLegacyDeliveryRows(conn, "autopix_deliveries_legacy_backup");
+            copyLegacyDeliveryRows(conn, backupRows);
+            try (Statement stmt = conn.createStatement()) {
+                stmt.executeUpdate("DROP TABLE autopix_deliveries_legacy_backup;");
+            }
+        }
+
         if (!tableExists(conn, "autopix_deliveries")) {
             try (Statement stmt = conn.createStatement()) {
                 stmt.executeUpdate(createNewDeliveriesSql);
@@ -297,27 +319,7 @@ public final class DatabaseMigrationRunner {
 
         if (!hasDeliveryId || orderIdIsPk) {
             // Migrate legacy single-delivery-per-order table to multi-item table preserving all rows
-            List<LegacyDeliveryRow> existingRows = new ArrayList<>();
-            try (Statement stmt = conn.createStatement();
-                 ResultSet rs = stmt.executeQuery("SELECT * FROM autopix_deliveries;")) {
-                Set<String> cols = getResultSetColumns(rs);
-                while (rs.next()) {
-                    LegacyDeliveryRow row = new LegacyDeliveryRow();
-                    row.orderId = rs.getInt("order_id");
-                    row.itemIndex = cols.contains("item_index") ? rs.getInt("item_index") : 0;
-                    row.playerUuid = cols.contains("player_uuid") ? rs.getString("player_uuid") : null;
-                    row.status = rs.getString("status") != null ? rs.getString("status") : "pending";
-                    row.deliveryType = cols.contains("delivery_type") && rs.getString("delivery_type") != null
-                            ? rs.getString("delivery_type") : "autopix";
-                    row.handler = cols.contains("handler") ? rs.getString("handler") : null;
-                    row.payload = cols.contains("payload") ? rs.getString("payload") : null;
-                    row.attempts = cols.contains("attempts") ? rs.getInt("attempts") : 0;
-                    row.updatedAt = cols.contains("updated_at") && rs.getTimestamp("updated_at") != null
-                            ? rs.getTimestamp("updated_at") : Timestamp.from(Instant.now());
-                    row.lastError = cols.contains("last_error") ? rs.getString("last_error") : null;
-                    existingRows.add(row);
-                }
-            }
+            List<LegacyDeliveryRow> existingRows = readLegacyDeliveryRows(conn, "autopix_deliveries");
 
             try (Statement stmt = conn.createStatement()) {
                 stmt.executeUpdate("DROP TABLE IF EXISTS autopix_deliveries_legacy_backup;");
@@ -363,6 +365,61 @@ public final class DatabaseMigrationRunner {
             addColumnIfMissing(conn, "autopix_deliveries", "claimed_at", "TIMESTAMP NULL");
             addColumnIfMissing(conn, "autopix_deliveries", "execution_stage", "VARCHAR(32) NULL");
             addColumnIfMissing(conn, "autopix_deliveries", "payload", "TEXT NULL");
+        }
+    }
+
+    private static List<LegacyDeliveryRow> readLegacyDeliveryRows(Connection conn, String tableName) throws SQLException {
+        List<LegacyDeliveryRow> rows = new ArrayList<>();
+        try (Statement stmt = conn.createStatement();
+             ResultSet rs = stmt.executeQuery("SELECT * FROM " + tableName + ";")) {
+            Set<String> cols = getResultSetColumns(rs);
+            while (rs.next()) {
+                LegacyDeliveryRow row = new LegacyDeliveryRow();
+                row.orderId = rs.getInt("order_id");
+                row.itemIndex = cols.contains("item_index") ? rs.getInt("item_index") : 0;
+                row.playerUuid = cols.contains("player_uuid") ? rs.getString("player_uuid") : null;
+                row.status = rs.getString("status") != null ? rs.getString("status") : "pending";
+                row.deliveryType = cols.contains("delivery_type") && rs.getString("delivery_type") != null
+                        ? rs.getString("delivery_type") : "autopix";
+                row.handler = cols.contains("handler") ? rs.getString("handler") : null;
+                row.payload = cols.contains("payload") ? rs.getString("payload") : null;
+                row.attempts = cols.contains("attempts") ? rs.getInt("attempts") : 0;
+                row.updatedAt = cols.contains("updated_at") && rs.getTimestamp("updated_at") != null
+                        ? rs.getTimestamp("updated_at") : Timestamp.from(Instant.now());
+                row.lastError = cols.contains("last_error") ? rs.getString("last_error") : null;
+                rows.add(row);
+            }
+        }
+        return rows;
+    }
+
+    private static void copyLegacyDeliveryRows(Connection conn, List<LegacyDeliveryRow> rows) throws SQLException {
+        String insertSql = "INSERT INTO autopix_deliveries "
+                + "(delivery_id, order_id, item_index, player_uuid, status, delivery_type, handler, "
+                + "idempotency_key, claim_token, claimed_at, execution_stage, payload, attempts, updated_at, last_error) "
+                + "VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, ?, ?, ?, ?);";
+        for (LegacyDeliveryRow row : rows) {
+            if (deliveryRowExists(conn,
+                    "SELECT delivery_id FROM autopix_deliveries WHERE order_id = ? AND item_index = ?;",
+                    row.orderId, row.itemIndex)) {
+                continue;
+            }
+            String deliveryId = "deliv_" + row.orderId + "_" + row.itemIndex;
+            try (PreparedStatement ins = conn.prepareStatement(insertSql)) {
+                ins.setString(1, deliveryId);
+                ins.setInt(2, row.orderId);
+                ins.setInt(3, row.itemIndex);
+                ins.setString(4, row.playerUuid);
+                ins.setString(5, row.status);
+                ins.setString(6, row.deliveryType);
+                ins.setString(7, row.handler);
+                ins.setString(8, deliveryId);
+                ins.setString(9, row.payload);
+                ins.setInt(10, row.attempts);
+                ins.setTimestamp(11, row.updatedAt);
+                ins.setString(12, row.lastError);
+                ins.executeUpdate();
+            }
         }
     }
 
