@@ -21,14 +21,20 @@ public class DeliveryStartedEvent extends Event {
     private final String deliveryType;
     private final String handler;
     private final OrderItem orderItem;
+    private final String claimToken;
     private final DeliveryStatus status;
 
     public DeliveryStartedEvent(String deliveryId, int orderId, int orderItemId, UUID playerUuid, String handler) {
-        this(deliveryId, orderId, orderItemId, playerUuid, handler, handler, null);
+        this(deliveryId, orderId, orderItemId, playerUuid, handler, handler, null, null);
     }
 
     public DeliveryStartedEvent(String deliveryId, int orderId, int orderItemId, UUID playerUuid,
                                 String deliveryType, String handler, OrderItem orderItem) {
+        this(deliveryId, orderId, orderItemId, playerUuid, deliveryType, handler, orderItem, null);
+    }
+
+    public DeliveryStartedEvent(String deliveryId, int orderId, int orderItemId, UUID playerUuid,
+                                String deliveryType, String handler, OrderItem orderItem, String claimToken) {
         super(false);
         this.deliveryId = deliveryId;
         this.orderId = orderId;
@@ -37,6 +43,7 @@ public class DeliveryStartedEvent extends Event {
         this.deliveryType = deliveryType != null ? deliveryType : "autopix";
         this.handler = handler != null ? handler : this.deliveryType;
         this.orderItem = orderItem;
+        this.claimToken = claimToken;
         this.status = DeliveryStatus.PROCESSING;
     }
 
@@ -50,6 +57,14 @@ public class DeliveryStartedEvent extends Event {
 
     public int getOrderItemId() {
         return orderItemId;
+    }
+
+    public int getItemIndex() {
+        return orderItemId;
+    }
+
+    public String getClaimToken() {
+        return claimToken;
     }
 
     public UUID getPlayerUuid() {

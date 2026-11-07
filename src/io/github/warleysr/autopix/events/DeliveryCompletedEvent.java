@@ -52,6 +52,10 @@ public class DeliveryCompletedEvent extends Event {
         return orderItemId;
     }
 
+    public int getItemIndex() {
+        return orderItemId;
+    }
+
     public UUID getPlayerUuid() {
         return playerUuid;
     }

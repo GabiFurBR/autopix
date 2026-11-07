@@ -1,4 +1,5 @@
 import:
+    io.github.warleysr.autopix.api.AutoPixAPI
     io.github.warleysr.autopix.events.PaymentApprovedEvent
     io.github.warleysr.autopix.events.DeliveryStartedEvent
     io.github.warleysr.autopix.events.DeliveryCompletedEvent
@@ -6,6 +7,18 @@ import:
     io.github.warleysr.autopix.events.DeliveryNeedsReviewEvent
     org.bukkit.entity.Player
     org.bukkit.Bukkit
+
+function executarEntregaCustomLoja(p: player, handler: text, orderId: text) :: boolean:
+    if {_p} is not set:
+        return false
+    if {_p}.isOnline() is not true:
+        return false
+    if {_handler} is not set:
+        return false
+    if {_handler} is "":
+        return false
+    lojaSucesso({_p}, "Processando benefícios exclusivos da sua compra (%{_handler}%)...")
+    return true
 
 on "io.github.warleysr.autopix.events.PaymentApprovedEvent":
     set {_p} to event.getPlayer()
@@ -27,10 +40,24 @@ on "io.github.warleysr.autopix.events.DeliveryStartedEvent":
     set {_deliveryType} to event.getDeliveryType()
     set {_p} to event.getPlayer()
     set {_orderId} to event.getOrderId()
+    set {_itemIndex} to event.getItemIndex()
+    set {_claimToken} to event.getClaimToken()
     if {_deliveryType} is "skript" or "hybrid":
-        if {_p} is set:
-            if {_p}.isOnline() is true:
-                lojaSucesso({_p}, "Processando benefícios exclusivos da sua compra (%{_handler}%)...")
+        if {_claimToken} is not set:
+            stop
+        if {_claimToken} is "":
+            stop
+        if {_p} is not set:
+            AutoPixAPI.failCustomDelivery({_orderId}, "%{_itemIndex}%", {_claimToken}, "Jogador offline durante entrega Skript.", true)
+            stop
+        if {_p}.isOnline() is not true:
+            AutoPixAPI.failCustomDelivery({_orderId}, "%{_itemIndex}%", {_claimToken}, "Jogador offline durante entrega Skript.", true)
+            stop
+        set {_ok} to executarEntregaCustomLoja({_p}, {_handler}, {_orderId})
+        if {_ok} is true:
+            AutoPixAPI.confirmCustomDelivery({_orderId}, "%{_itemIndex}%", {_claimToken})
+        else:
+            AutoPixAPI.failCustomDelivery({_orderId}, "%{_itemIndex}%", {_claimToken}, "Falha ao executar handler Skript %{_handler}%.", true)
 
 on "io.github.warleysr.autopix.events.DeliveryCompletedEvent":
     set {_p} to event.getPlayer()

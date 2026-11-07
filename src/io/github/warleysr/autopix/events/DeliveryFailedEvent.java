@@ -44,6 +44,10 @@ public class DeliveryFailedEvent extends Event {
         return orderItemId;
     }
 
+    public int getItemIndex() {
+        return orderItemId;
+    }
+
     public UUID getPlayerUuid() {
         return playerUuid;
     }
@@ -61,6 +65,10 @@ public class DeliveryFailedEvent extends Event {
     }
 
     public String getError() {
+        return error;
+    }
+
+    public String getReason() {
         return error;
     }
 

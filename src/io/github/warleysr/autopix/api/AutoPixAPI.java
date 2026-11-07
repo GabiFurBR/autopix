@@ -32,6 +32,7 @@ import io.github.warleysr.autopix.catalog.CustomDonationConfig;
 import io.github.warleysr.autopix.catalog.DeliveryConfig;
 import io.github.warleysr.autopix.catalog.Offer;
 import io.github.warleysr.autopix.catalog.Product;
+import io.github.warleysr.autopix.delivery.DeliveryManager;
 import io.github.warleysr.autopix.domain.CartItem;
 import io.github.warleysr.autopix.domain.Order;
 import io.github.warleysr.autopix.domain.OrderItem;
@@ -649,6 +650,68 @@ public final class AutoPixAPI {
             }
         });
         return future;
+    }
+
+    public static CompletionStage<Boolean> confirmCustomDelivery(int orderId, int itemIndex, String claimToken) {
+        CompletableFuture<Boolean> future = new CompletableFuture<>();
+        AutoPix plugin = AutoPix.getInstance();
+        if (!OrderManager.isDatabaseReady() || OrderManager.isShuttingDown()) {
+            completeOnMainThread(plugin, future, false);
+            return future;
+        }
+        runAsyncOrNow(plugin, () -> {
+            boolean confirmed = DeliveryManager.confirmCustomDelivery(orderId, itemIndex, claimToken);
+            completeOnMainThread(plugin, future, confirmed);
+        });
+        return future;
+    }
+
+    public static CompletionStage<Boolean> confirmCustomDelivery(String orderId, String orderItemId, String claimToken) {
+        try {
+            int parsedOrderId = Integer.parseInt(orderId != null ? orderId.trim() : "-1");
+            int parsedItemIndex = Integer.parseInt(orderItemId != null ? orderItemId.trim() : "-1");
+            return confirmCustomDelivery(parsedOrderId, parsedItemIndex, claimToken);
+        } catch (NumberFormatException ex) {
+            CompletableFuture<Boolean> future = new CompletableFuture<>();
+            completeOnMainThread(AutoPix.getInstance(), future, false);
+            return future;
+        }
+    }
+
+    public static CompletionStage<Boolean> failCustomDelivery(int orderId, int itemIndex, String claimToken, String reason) {
+        return failCustomDelivery(orderId, itemIndex, claimToken, reason, true);
+    }
+
+    public static CompletionStage<Boolean> failCustomDelivery(int orderId, int itemIndex, String claimToken,
+                                                              String reason, boolean retryable) {
+        CompletableFuture<Boolean> future = new CompletableFuture<>();
+        AutoPix plugin = AutoPix.getInstance();
+        if (!OrderManager.isDatabaseReady() || OrderManager.isShuttingDown()) {
+            completeOnMainThread(plugin, future, false);
+            return future;
+        }
+        runAsyncOrNow(plugin, () -> {
+            boolean recorded = DeliveryManager.failCustomDelivery(orderId, itemIndex, claimToken, reason, retryable);
+            completeOnMainThread(plugin, future, recorded);
+        });
+        return future;
+    }
+
+    public static CompletionStage<Boolean> failCustomDelivery(String orderId, String orderItemId, String claimToken, String reason) {
+        return failCustomDelivery(orderId, orderItemId, claimToken, reason, true);
+    }
+
+    public static CompletionStage<Boolean> failCustomDelivery(String orderId, String orderItemId, String claimToken,
+                                                              String reason, boolean retryable) {
+        try {
+            int parsedOrderId = Integer.parseInt(orderId != null ? orderId.trim() : "-1");
+            int parsedItemIndex = Integer.parseInt(orderItemId != null ? orderItemId.trim() : "-1");
+            return failCustomDelivery(parsedOrderId, parsedItemIndex, claimToken, reason, retryable);
+        } catch (NumberFormatException ex) {
+            CompletableFuture<Boolean> future = new CompletableFuture<>();
+            completeOnMainThread(AutoPix.getInstance(), future, false);
+            return future;
+        }
     }
 
     // =========================================================================
