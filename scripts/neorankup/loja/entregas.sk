@@ -110,6 +110,9 @@ on "io.github.warleysr.autopix.events.DeliveryStartedEvent":
     set {_itemIndex} to event.getItemIndex()
     set {_claimToken} to event.getClaimToken()
     set {_orderItem} to event.getOrderItem()
+    set {_productId} to "desconhecido"
+    if {_orderItem} is set:
+        set {_productId} to {_orderItem}.getProductId()
     if {_deliveryType} is "skript" or "hybrid":
         if {_claimToken} is not set:
             stop
@@ -125,7 +128,7 @@ on "io.github.warleysr.autopix.events.DeliveryStartedEvent":
         if {_ok} is true:
             AutoPixAPI.confirmCustomDelivery({_orderId}, "%{_itemIndex}%", {_claimToken})
         else:
-            AutoPixAPI.failCustomDelivery({_orderId}, "%{_itemIndex}%", {_claimToken}, "Handler Skript inválido, incompleto ou em estado de revisão: %{_handler}% / %{_orderItem}.getProductId()%", false)
+            AutoPixAPI.failCustomDelivery({_orderId}, "%{_itemIndex}%", {_claimToken}, "Handler Skript inválido, incompleto ou em estado de revisão: %{_handler}% / %{_productId}%", false)
 
 on "io.github.warleysr.autopix.events.DeliveryCompletedEvent":
     set {_p} to event.getPlayer()
