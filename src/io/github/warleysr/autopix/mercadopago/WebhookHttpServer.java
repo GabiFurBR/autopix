@@ -194,10 +194,10 @@ public final class WebhookHttpServer {
             }
         }
 
-        String resolvedDataId = jsonDataId != null ? jsonDataId : (queryDataId != null ? queryDataId : queryNotifId);
-        String resolvedNotificationId = jsonNotifId != null
-                ? jsonNotifId
-                : (queryNotifId != null && (jsonDataId != null || queryDataId != null) ? queryNotifId : null);
+        // Mercado Pago's root "id" and query "id" identify the notification, not the payment resource.
+        // Only data.id (from JSON or query) may be used to fetch/reconcile a payment.
+        String resolvedDataId = jsonDataId != null ? jsonDataId : queryDataId;
+        String resolvedNotificationId = jsonNotifId != null ? jsonNotifId : queryNotifId;
         String normalizedRequestId = xRequestId != null && !xRequestId.trim().isEmpty() ? xRequestId.trim() : null;
 
         return new ParsedWebhookRequest(topic, resolvedDataId, resolvedNotificationId, normalizedRequestId);
