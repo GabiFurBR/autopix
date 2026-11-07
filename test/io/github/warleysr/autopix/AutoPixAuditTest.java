@@ -1241,6 +1241,14 @@ class AutoPixAuditTest {
         assertTrue(checkoutContent.contains("function iniciarDoacaoPersonalizada("));
         assertTrue(checkoutContent.contains("CheckoutRequest.customDonation("));
 
+        String deliveryContent = Files.readString(new File(skriptDir, "entregas.sk").toPath(), StandardCharsets.UTF_8);
+        assertTrue(deliveryContent.contains("function executarEntregaCustomLoja("));
+        assertTrue(deliveryContent.contains("addgem({_p}, {_amount})"));
+        assertTrue(deliveryContent.contains("addstars({_p}, {_amount})"));
+        assertTrue(deliveryContent.contains("addpumpcoins({_p}, {_amount})"));
+        assertTrue(deliveryContent.contains("::state} to \\"APPLIED\\""));
+        assertTrue(deliveryContent.contains("AutoPixAPI.confirmCustomDelivery("));
+
         // Verify all methods invoked by Skript exist on the Java classes
         assertNotNull(CatalogManager.class.getMethod("getProductsByCategory", String.class));
         assertNotNull(CatalogManager.class.getMethod("getCustomDonationConfig"));
@@ -1251,6 +1259,7 @@ class AutoPixAuditTest {
         assertNotNull(DeliveryStartedEvent.class.getMethod("getDeliveryType"));
         assertNotNull(DeliveryStartedEvent.class.getMethod("getClaimToken"));
         assertNotNull(DeliveryStartedEvent.class.getMethod("getItemIndex"));
+        assertNotNull(DeliveryStartedEvent.class.getMethod("getOrderItem"));
         assertNotNull(AutoPixAPI.class.getMethod("confirmCustomDelivery", String.class, String.class, String.class));
         assertNotNull(AutoPixAPI.class.getMethod("failCustomDelivery", String.class, String.class, String.class, String.class, boolean.class));
         assertNotNull(AutoPixAPI.class.getMethod("renewSubscription", String.class));
@@ -1324,10 +1333,28 @@ class AutoPixAuditTest {
         assertEquals("req-header-abc", parsed.getRequestId(), "requestId deve corresponder ao header x-request-id.");
         assertEquals("payment", parsed.getTopic());
 
+        // A notification ID must never be used as the payment resource ID.
+        URI notificationOnlyUri = URI.create("http://127.0.0.1:8090/autopix/webhook/mercadopago?id=111222333&type=payment");
+        WebhookHttpServer.ParsedWebhookRequest missingDataId = WebhookHttpServer.parseWebhookRequest(
+                notificationOnlyUri, "{\\"id\\":999000111,\\"type\\":\\"payment\\"}", "req-header-missing-data");
+        assertNull(missingDataId.getDataId(), "Root/query notification IDs must not be accepted as data.id.");
+        assertEquals("999000111", missingDataId.getNotificationId());
+
+        URI queryDataOnlyUri = URI.create("http://127.0.0.1:8090/autopix/webhook/mercadopago?data.id=777888999&id=111222333&type=payment");
+        WebhookHttpServer.ParsedWebhookRequest queryDataParsed = WebhookHttpServer.parseWebhookRequest(
+                queryDataOnlyUri, "{\\"id\\":999000111,\\"type\\":\\"payment\\"}", "req-header-query-data");
+        assertEquals("777888999", queryDataParsed.getDataId());
+        assertEquals("999000111", queryDataParsed.getNotificationId());
+
         // 2. Start real loopback WebhookHttpServer on ephemeral port and verify accurate HTTP status codes
         assertTrue(WebhookHttpServer.startEndpoint(null, "127.0.0.1", 0, "/autopix/webhook/mercadopago"));
         int port = WebhookHttpServer.getBoundPort();
         assertTrue(port > 0);
+        URI notificationOnlyEndpoint = URI.create("http://127.0.0.1:" + port
+                + "/autopix/webhook/mercadopago?id=notif_without_payment&type=payment");
+        assertEquals(400, postWebhookHttp(notificationOnlyEndpoint, null, null,
+                "{\\"id\\":999000111,\\"type\\":\\"payment\\"}"),
+                "Webhook sem data.id deve retornar 400 mesmo quando existe ID da notificacao.");
         URI endpoint = URI.create("http://127.0.0.1:" + port + "/autopix/webhook/mercadopago?data.id=mp_http_pay_1&id=notif_001&type=payment");
 
         PixData pd = new PixData("mp_http_pay_1", "QR_HTTP_1");
