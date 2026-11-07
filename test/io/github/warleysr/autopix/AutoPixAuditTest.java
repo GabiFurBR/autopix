@@ -1246,7 +1246,7 @@ class AutoPixAuditTest {
         assertTrue(deliveryContent.contains("addgem({_p}, {_amount})"));
         assertTrue(deliveryContent.contains("addstars({_p}, {_amount})"));
         assertTrue(deliveryContent.contains("addpumpcoins({_p}, {_amount})"));
-        assertTrue(deliveryContent.contains("::state} to \\"APPLIED\\""));
+        assertTrue(deliveryContent.contains("::state} to \"APPLIED\""));
         assertTrue(deliveryContent.contains("AutoPixAPI.confirmCustomDelivery("));
 
         // Verify all methods invoked by Skript exist on the Java classes
@@ -1336,13 +1336,13 @@ class AutoPixAuditTest {
         // A notification ID must never be used as the payment resource ID.
         URI notificationOnlyUri = URI.create("http://127.0.0.1:8090/autopix/webhook/mercadopago?id=111222333&type=payment");
         WebhookHttpServer.ParsedWebhookRequest missingDataId = WebhookHttpServer.parseWebhookRequest(
-                notificationOnlyUri, "{\\"id\\":999000111,\\"type\\":\\"payment\\"}", "req-header-missing-data");
+                notificationOnlyUri, "{\"id\":999000111,\"type\":\"payment\"}", "req-header-missing-data");
         assertNull(missingDataId.getDataId(), "Root/query notification IDs must not be accepted as data.id.");
         assertEquals("999000111", missingDataId.getNotificationId());
 
         URI queryDataOnlyUri = URI.create("http://127.0.0.1:8090/autopix/webhook/mercadopago?data.id=777888999&id=111222333&type=payment");
         WebhookHttpServer.ParsedWebhookRequest queryDataParsed = WebhookHttpServer.parseWebhookRequest(
-                queryDataOnlyUri, "{\\"id\\":999000111,\\"type\\":\\"payment\\"}", "req-header-query-data");
+                queryDataOnlyUri, "{\"id\":999000111,\"type\":\"payment\"}", "req-header-query-data");
         assertEquals("777888999", queryDataParsed.getDataId());
         assertEquals("999000111", queryDataParsed.getNotificationId());
 
@@ -1353,7 +1353,7 @@ class AutoPixAuditTest {
         URI notificationOnlyEndpoint = URI.create("http://127.0.0.1:" + port
                 + "/autopix/webhook/mercadopago?id=notif_without_payment&type=payment");
         assertEquals(400, postWebhookHttp(notificationOnlyEndpoint, null, null,
-                "{\\"id\\":999000111,\\"type\\":\\"payment\\"}"),
+                "{\"id\":999000111,\"type\":\"payment\"}"),
                 "Webhook sem data.id deve retornar 400 mesmo quando existe ID da notificacao.");
         URI endpoint = URI.create("http://127.0.0.1:" + port + "/autopix/webhook/mercadopago?data.id=mp_http_pay_1&id=notif_001&type=payment");
 
