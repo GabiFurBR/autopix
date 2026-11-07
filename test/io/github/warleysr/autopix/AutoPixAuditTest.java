@@ -1772,7 +1772,7 @@ class AutoPixAuditTest {
                 insert.setString(3, "delivered");
                 insert.setString(4, "autopix");
                 insert.setString(5, "autopix");
-                insert.setString(6, "{\\"already\\":true}");
+                insert.setString(6, "legacy-row-1");
                 insert.setInt(7, 1);
                 insert.setTimestamp(8, now);
                 insert.setString(9, null);
@@ -1783,7 +1783,7 @@ class AutoPixAuditTest {
                 insert.setString(3, "pending");
                 insert.setString(4, "skript");
                 insert.setString(5, "gems_purchase");
-                insert.setString(6, "{\\"notCopied\\":true}");
+                insert.setString(6, "legacy-row-2");
                 insert.setInt(7, 0);
                 insert.setTimestamp(8, now);
                 insert.setString(9, null);
