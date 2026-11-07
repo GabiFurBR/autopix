@@ -588,7 +588,7 @@ public final class SubscriptionManager {
             }
 
             String updateInvSql = "UPDATE autopix_subscription_invoices SET status = ? WHERE invoice_id = ? AND status <> 'PAID';";
-            String updateSubSql = "UPDATE autopix_subscriptions SET status = ?, grace_until = ?, updated_at = ? WHERE subscription_id = ?;";
+            String updateSubSql = "UPDATE autopix_subscriptions SET status = ?, grace_until = COALESCE(grace_until, ?), updated_at = ? WHERE subscription_id = ?;";
 
             try (Connection connection = OrderManager.getConnection()) {
                 connection.setAutoCommit(false);
