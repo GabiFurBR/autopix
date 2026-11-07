@@ -296,7 +296,28 @@ public class OrderManager {
         return ONLINE_PLAYERS.get(playerName.toLowerCase(Locale.ROOT));
     }
 
+    private static volatile Thread simulatedMainThreadForTesting;
+
+    public static void setSimulatedMainThreadForTesting(Thread thread) {
+        simulatedMainThreadForTesting = thread;
+    }
+
+    public static boolean isOnMainThread() {
+        Thread sim = simulatedMainThreadForTesting;
+        if (sim != null) {
+            return Thread.currentThread() == sim;
+        }
+        try {
+            return Bukkit.getServer() != null && Bukkit.isPrimaryThread();
+        } catch (Throwable ignored) {
+            return false;
+        }
+    }
+
     public static Connection getConnection() throws SQLException {
+        if (isOnMainThread()) {
+            throw new IllegalStateException("Operacao JDBC bloqueante detectada na main thread do Bukkit!");
+        }
         HikariDataSource source = dataSource;
         if (source == null || source.isClosed()) {
             throw new SQLException("O pool de conexoes do AutoPix nao esta inicializado.");
@@ -698,22 +719,23 @@ public class OrderManager {
 
     public static boolean cancelOrder(int orderId, String reason) {
         String sql = "UPDATE autopix_orders SET status = 'CANCELLED', cancelled_at = CURRENT_TIMESTAMP WHERE id = ? AND pix IS NULL;";
+        boolean updated;
         try (Connection connection = getConnection();
              PreparedStatement statement = connection.prepareStatement(sql)) {
             statement.setInt(1, orderId);
-            boolean updated = statement.executeUpdate() > 0;
-            if (updated) {
-                Order order = getOrderById(orderId);
-                if (order != null) {
-                    PixData pd = getPixData(order);
-                    if (pd != null) cancelPendingPixData(pd);
-                }
-            }
-            return updated;
+            updated = statement.executeUpdate() > 0;
         } catch (SQLException exception) {
             logSqlError("Erro ao cancelar pedido #" + orderId, exception);
             return false;
         }
+        if (updated) {
+            Order order = getOrderById(orderId);
+            if (order != null) {
+                PixData pd = getPixData(order);
+                if (pd != null) cancelPendingPixData(pd);
+            }
+        }
+        return updated;
     }
 
     public static Order readOrder(ResultSet result) throws SQLException {
