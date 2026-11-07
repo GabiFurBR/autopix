@@ -1839,6 +1839,55 @@ class AutoPixAuditTest {
     }
 
     @Test
+    void testDueSubscriptionScannerReconcilesApprovedPendingInvoiceAfterInterruptedHook() throws Exception {
+        enableProviderHooks();
+        UUID playerUuid = UUID.randomUUID();
+        DeliveryConfig delivery = new DeliveryConfig(DeliveryType.AUTOPIX, List.of(), null);
+        Offer offer = new Offer("monthly", "sub_recovery_vip", OfferType.SUBSCRIPTION,
+                new BigDecimal("29.90"), "30d", true);
+        Product product = new Product("sub_recovery_vip", "VIP Recovery Test", "vips",
+                true, new BigDecimal("29.90"), List.of(offer), delivery);
+        CatalogManager.registerProductForTesting(product);
+
+        SubscriptionResult created = SubscriptionManager.createSubscription(
+                playerUuid, "sub_recovery_vip", "monthly");
+        assertTrue(created.isSuccessful());
+        assertEquals(SubscriptionStatus.PENDING,
+                SubscriptionManager.getSubscription(created.getSubscription().getId()).getStatus());
+
+        int chargeCountBeforeRecovery = generatedPaymentCounter.get();
+        String transactionId = "E_RECOVERED_INITIAL_PAYMENT";
+        try (Connection conn = OrderManager.getConnection();
+             PreparedStatement orderUpdate = conn.prepareStatement(
+                     "UPDATE autopix_orders SET status = 'PAID', pix = ?, paid_at = CURRENT_TIMESTAMP WHERE id = ?");
+             PreparedStatement pixUpdate = conn.prepareStatement(
+                     "UPDATE autopix_pix_data SET status = 'approved' WHERE payment_id = ?;");
+             PreparedStatement paymentUpdate = conn.prepareStatement(
+                     "UPDATE autopix_payments SET status = 'PAID', paid_at = CURRENT_TIMESTAMP WHERE payment_id = ?;")) {
+            orderUpdate.setString(1, transactionId);
+            orderUpdate.setInt(2, created.getOrder().getId());
+            assertEquals(1, orderUpdate.executeUpdate());
+            pixUpdate.setString(1, created.getPayment().getId());
+            assertEquals(1, pixUpdate.executeUpdate());
+            paymentUpdate.setString(1, created.getPayment().getId());
+            assertEquals(1, paymentUpdate.executeUpdate());
+        }
+
+        // Simulate a crash after the order was marked paid but before the subscription hook
+        // committed the invoice and subscription state transitions.
+        SubscriptionManager.processDueSubscriptions();
+
+        Subscription recovered = SubscriptionManager.getSubscription(created.getSubscription().getId());
+        SubscriptionInvoice invoice = SubscriptionManager.getInvoice(created.getInvoice().getInvoiceId());
+        assertEquals(SubscriptionStatus.ACTIVE, recovered.getStatus());
+        assertTrue(invoice.isPaid(), "A paid PIX order must not leave its subscription invoice pending.");
+        assertNotNull(recovered.getNextBillingAt());
+        assertTrue(recovered.getNextBillingAt().isAfter(Instant.now()));
+        assertEquals(chargeCountBeforeRecovery, generatedPaymentCounter.get(),
+                "Reconciliation must not create another PIX charge.");
+    }
+
+    @Test
     void testFinancialCalculationsPreserveBigDecimalPrecisionAndValidateScale() throws Exception {
         // 1. PixGenerator BigDecimal precision and scale validation
         assertTrue(PixGenerator.isValidCurrencyAmount(new BigDecimal("19.99")));
