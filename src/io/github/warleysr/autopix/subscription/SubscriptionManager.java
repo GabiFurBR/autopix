@@ -443,6 +443,23 @@ public final class SubscriptionManager {
                 if ("PENDING".equalsIgnoreCase(inv.getStatus()) && inv.getOrderId() != null) {
                     Order order = OrderManager.getOrderById(inv.getOrderId());
                     Payment payment = OrderManager.getPaymentByOrderId(inv.getOrderId());
+                    if (order != null && order.isValidated()) {
+                        onOrderPaymentApproved(order.getId(), inv.getProviderPaymentId(),
+                                order.getTransaction(), order.getTotal());
+                        Subscription updated = getSubscription(normSubId);
+                        SubscriptionInvoice updatedInvoice = getInvoice(inv.getInvoiceId());
+                        return SubscriptionResult.success(updated, updatedInvoice, order, payment,
+                                "Pagamento inicial ja aprovado; estado da assinatura reconciliado.");
+                    }
+                    if (order != null && payment == null) {
+                        PixData pixData = OrderManager.getPixData(order);
+                        if (pixData != null) {
+                            payment = new Payment(pixData.getPaymentId(), pixData.getPaymentId(),
+                                    PaymentStatus.PENDING, pixData.getQrCode(), pixData.getQrCode(),
+                                    null, inv.getDueDate());
+                            OrderManager.savePayment(payment, order.getId(), inv.getAmount());
+                        }
+                    }
                     if (order != null && payment != null) {
                         return SubscriptionResult.success(
                                 sub, inv, order, payment,
@@ -657,14 +674,21 @@ public final class SubscriptionManager {
 
         String pastDueSql = "SELECT subscription_id, player_uuid, grace_until FROM autopix_subscriptions "
                 + "WHERE status = 'PAST_DUE' AND grace_until IS NOT NULL;";
+        List<String[]> toSuspend = new ArrayList<>();
+        List<String> toRetry = new ArrayList<>();
         try (Connection connection = OrderManager.getConnection();
              PreparedStatement stmt = connection.prepareStatement(pastDueSql);
              ResultSet rs = stmt.executeQuery()) {
-            List<String[]> toSuspend = new ArrayList<>();
             while (rs.next()) {
+                String subId = rs.getString("subscription_id");
                 Instant graceUntil = parseSqlTimestamp(rs, "grace_until");
-                if (graceUntil != null && graceUntil.isBefore(now)) {
-                    toSuspend.add(new String[]{rs.getString("subscription_id"), rs.getString("player_uuid")});
+                if (subId == null || graceUntil == null) {
+                    continue;
+                }
+                if (graceUntil.isBefore(now)) {
+                    toSuspend.add(new String[]{subId, rs.getString("player_uuid")});
+                } else {
+                    toRetry.add(subId);
                 }
             }
             for (String[] entry : toSuspend) {
@@ -688,6 +712,20 @@ public final class SubscriptionManager {
             }
         } catch (SQLException ex) {
             logError("Erro ao processar assinaturas vencidas", ex);
+        }
+
+        // Retry missing/failed renewal attempts while the grace period is active.
+        // renewSubscription returns an existing valid PENDING invoice idempotently, so
+        // repeated scheduler runs do not create another charge for the same cycle.
+        for (String subId : toRetry) {
+            SubscriptionResult retry = renewSubscription(subId);
+            if (!retry.isSuccessful()) {
+                AutoPix plugin = AutoPix.getInstance();
+                if (plugin != null) {
+                    plugin.getLogger().warning("Renovacao da assinatura " + subId
+                            + " ainda pendente de recuperacao: " + retry.getMessage());
+                }
+            }
         }
     }
 
