@@ -7,7 +7,6 @@ import:
     io.github.warleysr.autopix.events.DeliveryNeedsReviewEvent
     org.bukkit.entity.Player
     org.bukkit.Bukkit
-
 function executarEntregaCustomLoja(p: player, handler: text, orderId: text, itemIndex: number, claimToken: text, orderItem: object) :: boolean:
     if {_p} is not set:
         return false
@@ -21,14 +20,12 @@ function executarEntregaCustomLoja(p: player, handler: text, orderId: text, item
         return false
     if {_claimToken} is "":
         return false
-
     set {_productId} to {_orderItem}.getProductId()
     set {_quantity} to {_orderItem}.getQuantity()
     if {_quantity} is not set:
         return false
     if {_quantity} <= 0:
         return false
-
     set {_unitAmount} to 0
     if {_handler} is "gems_purchase":
         if {_productId} is "gems_5k":
@@ -55,22 +52,18 @@ function executarEntregaCustomLoja(p: player, handler: text, orderId: text, item
             return false
     else:
         return false
-
     if {_unitAmount} <= 0:
         return false
     set {_amount} to {_unitAmount} * {_quantity}
-
     set {_deliveryState} to {autopix::delivery::%{_orderId}%::%{_itemIndex}%::state}
     if {_deliveryState} is "APPLIED":
         return true
     if {_deliveryState} is set:
         return false
-
     set {autopix::delivery::%{_orderId}%::%{_itemIndex}%::state} to "PROCESSING"
     set {autopix::delivery::%{_orderId}%::%{_itemIndex}%::claim} to {_claimToken}
     set {autopix::delivery::%{_orderId}%::%{_itemIndex}%::handler} to {_handler}
     set {autopix::delivery::%{_orderId}%::%{_itemIndex}%::amount} to {_amount}
-
     if {_handler} is "gems_purchase":
         addgem({_p}, {_amount})
         nr_reward_record({_p}, "Loja AutoPix", "%{_amount}% Gemas")
@@ -83,10 +76,8 @@ function executarEntregaCustomLoja(p: player, handler: text, orderId: text, item
         addpumpcoins({_p}, {_amount})
         nr_reward_record({_p}, "Loja AutoPix", "%{_amount}% PumpCoins")
         lojaSucesso({_p}, "Compra confirmada: &6%{_amount}% PumpCoins&f adicionados à sua conta.")
-
     set {autopix::delivery::%{_orderId}%::%{_itemIndex}%::state} to "APPLIED"
     return true
-
 on "io.github.warleysr.autopix.events.PaymentApprovedEvent":
     set {_p} to event.getPlayer()
     set {_nome} to event.getPlayerName()
@@ -101,7 +92,6 @@ on "io.github.warleysr.autopix.events.PaymentApprovedEvent":
         if {_p}.isOnline() is true:
             play sound "ui.toast.challenge_complete" with volume 1 and pitch 1 to {_p}
             send title "&a&lPAGAMENTO APROVADO!" with subtitle "&fObrigado pelo seu apoio, &e%{_nome}%&f!" to {_p} for 4 seconds
-
 on "io.github.warleysr.autopix.events.DeliveryStartedEvent":
     set {_handler} to event.getHandler()
     set {_deliveryType} to event.getDeliveryType()
@@ -129,20 +119,17 @@ on "io.github.warleysr.autopix.events.DeliveryStartedEvent":
             AutoPixAPI.confirmCustomDelivery({_orderId}, "%{_itemIndex}%", {_claimToken})
         else:
             AutoPixAPI.failCustomDelivery({_orderId}, "%{_itemIndex}%", {_claimToken}, "Handler Skript inválido, incompleto ou em estado de revisão: %{_handler}% / %{_productId}%", false)
-
 on "io.github.warleysr.autopix.events.DeliveryCompletedEvent":
     set {_p} to event.getPlayer()
     if {_p} is set:
         if {_p}.isOnline() is true:
             lojaSucesso({_p}, "Todos os benefícios do pedido #%event.getOrderId()% foram entregues com sucesso!")
-
 on "io.github.warleysr.autopix.events.DeliveryFailedEvent":
     set {_orderId} to event.getOrderId()
     set {_reason} to event.getReason()
     loop all players:
         if loop-player has permission "autopix.admin":
             send "&c&l[ALERTA AUTOPIX] &fFalha na entrega do pedido &e#%{_orderId}%&f: %{_reason}%" to loop-player
-
 on "io.github.warleysr.autopix.events.DeliveryNeedsReviewEvent":
     set {_orderId} to event.getOrderId()
     set {_reason} to event.getReason()
