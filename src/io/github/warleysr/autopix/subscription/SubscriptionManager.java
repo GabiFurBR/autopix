@@ -125,7 +125,8 @@ public final class SubscriptionManager {
 
             Order order = OrderManager.createOrderDetailed(
                     playerName, uuid, summary, price, price, BigDecimal.ZERO,
-                    null, dueDate, pixData, Collections.singletonList(subItem));
+                    null, dueDate, pixData, Collections.singletonList(subItem),
+                    "sub_order_" + subscriptionId + "_cycle_1");
             if (order == null) {
                 return SubscriptionResult.failure("Erro ao registrar o pedido da assinatura no banco de dados.");
             }
@@ -133,7 +134,14 @@ public final class SubscriptionManager {
             Payment payment = new Payment(
                     pixData.getPaymentId(), pixData.getPaymentId(), PaymentStatus.PENDING,
                     pixData.getQrCode(), pixData.getQrCode(), null, dueDate);
-            OrderManager.savePayment(payment, order.getId(), price);
+            if (!OrderManager.savePayment(payment, order.getId(), price)) {
+                AutoPix plugin = AutoPix.getInstance();
+                if (plugin != null) {
+                    plugin.getLogger().severe("Pagamento PIX da assinatura " + subscriptionId
+                            + " foi criado, mas o registro auxiliar autopix_payments falhou. "
+                            + "O pedido e a fatura serao mantidos para recuperacao sem gerar outra cobranca.");
+                }
+            }
 
             String insertSubSql = "INSERT INTO autopix_subscriptions "
                     + "(subscription_id, player_uuid, product_id, plan_id, provider_subscription_id, status, price, currency, "
@@ -233,6 +241,7 @@ public final class SubscriptionManager {
 
             SubscriptionInvoice openPendingInvoice = null;
             String reusableFailedInvoiceId = null;
+            String retrySeed = null;
             int nextCycle = 2;
 
             try (Connection connection = OrderManager.getConnection()) {
@@ -248,7 +257,7 @@ public final class SubscriptionManager {
                 }
 
                 if (openPendingInvoice == null) {
-                    String latestSql = "SELECT invoice_id, cycle_number, status FROM autopix_subscription_invoices "
+                    String latestSql = "SELECT invoice_id, cycle_number, status, provider_payment_id FROM autopix_subscription_invoices "
                             + "WHERE subscription_id = ? ORDER BY cycle_number DESC LIMIT 1;";
                     try (PreparedStatement latestStmt = connection.prepareStatement(latestSql)) {
                         latestStmt.setString(1, normSubId);
@@ -259,6 +268,7 @@ public final class SubscriptionManager {
                                 if (latestStatus != null && !"PAID".equalsIgnoreCase(latestStatus.trim())) {
                                     nextCycle = Math.max(1, latestCycle);
                                     reusableFailedInvoiceId = rs.getString("invoice_id");
+                                    retrySeed = rs.getString("provider_payment_id");
                                 } else {
                                     nextCycle = Math.max(1, latestCycle) + 1;
                                 }
@@ -272,23 +282,41 @@ public final class SubscriptionManager {
             }
 
             if (openPendingInvoice != null) {
-                Order existingOrder = openPendingInvoice.getOrderId() != null
-                        ? OrderManager.getOrderById(openPendingInvoice.getOrderId())
-                        : null;
-                Payment existingPayment = openPendingInvoice.getOrderId() != null
-                        ? OrderManager.getPaymentByOrderId(openPendingInvoice.getOrderId())
-                        : null;
-                if (existingOrder != null
-                        && existingOrder.getStatus() != OrderStatus.CANCELLED
-                        && existingOrder.getStatus() != OrderStatus.EXPIRED
-                        && existingOrder.getStatus() != OrderStatus.FAILED
-                        && existingPayment != null) {
+                if (openPendingInvoice.getOrderId() == null) {
+                    return SubscriptionResult.failure("A fatura pendente nao possui pedido vinculado. Nenhuma nova cobranca foi criada; requer conciliacao administrativa.");
+                }
+
+                Order existingOrder = OrderManager.getOrderById(openPendingInvoice.getOrderId());
+                if (existingOrder == null) {
+                    return SubscriptionResult.failure("O pedido da fatura pendente nao foi encontrado. Nenhuma nova cobranca foi criada para evitar duplicidade.");
+                }
+
+                boolean terminalOrder = existingOrder.getStatus() == OrderStatus.CANCELLED
+                        || existingOrder.getStatus() == OrderStatus.EXPIRED
+                        || existingOrder.getStatus() == OrderStatus.FAILED;
+                if (!terminalOrder) {
+                    Payment existingPayment = OrderManager.getPaymentByOrderId(openPendingInvoice.getOrderId());
+                    if (existingPayment == null) {
+                        PixData existingPixData = OrderManager.getPixData(existingOrder);
+                        if (existingPixData != null) {
+                            existingPayment = new Payment(
+                                    existingPixData.getPaymentId(), existingPixData.getPaymentId(),
+                                    PaymentStatus.PENDING, existingPixData.getQrCode(),
+                                    existingPixData.getQrCode(), null, openPendingInvoice.getDueDate());
+                            OrderManager.savePayment(existingPayment, existingOrder.getId(), openPendingInvoice.getAmount());
+                        }
+                    }
+                    if (existingPayment == null) {
+                        return SubscriptionResult.failure("A cobranca da fatura pendente existe, mas seus dados PIX nao puderam ser recuperados. Nenhuma nova cobranca foi criada.");
+                    }
                     return SubscriptionResult.success(
                             sub, openPendingInvoice, existingOrder, existingPayment,
-                            "Cobrança de renovação pendente recuperada para pagamento.");
+                            "Cobranca pendente recuperada de forma idempotente.");
                 }
+
                 reusableFailedInvoiceId = openPendingInvoice.getInvoiceId();
                 nextCycle = openPendingInvoice.getCycleNumber();
+                retrySeed = openPendingInvoice.getProviderPaymentId();
             }
 
             Instant now = Instant.now();
@@ -300,19 +328,22 @@ public final class SubscriptionManager {
                             1, amount, amount, "autopix", null, duration, Collections.emptyList(), Collections.emptyList());
 
             String summary = truncate("Renovação " + sub.getProductId() + " (Ciclo #" + nextCycle + ")", 64);
-            String idempotencyKey = reusableFailedInvoiceId == null
-                    ? "sub_charge_" + normSubId + "_cycle_" + nextCycle
-                    : "sub_charge_" + normSubId + "_cycle_" + nextCycle + "_retry_"
-                            + UUID.randomUUID().toString().replace("-", "").substring(0, 8);
+            String retryToken = retrySeed != null && !retrySeed.trim().isEmpty()
+                    ? retrySeed.trim().replaceAll("[^A-Za-z0-9_-]", "_")
+                    : (reusableFailedInvoiceId != null ? reusableFailedInvoiceId : "initial");
+            String idempotencyKey = "sub_charge_" + normSubId + "_cycle_" + nextCycle
+                    + (reusableFailedInvoiceId != null ? "_retry_" + retryToken : "");
 
             PixData pixData = createProviderOrLocalCharge(playerName, summary, amount, normSubId, idempotencyKey);
             if (pixData == null) {
                 return SubscriptionResult.failure("Não foi possível gerar a cobrança PIX de renovação.");
             }
 
+            String orderIdempotencyKey = "sub_order_" + normSubId + "_cycle_" + nextCycle
+                    + (reusableFailedInvoiceId != null ? "_retry_" + retryToken : "");
             Order order = OrderManager.createOrderDetailed(
                     playerName, sub.getPlayerUuid(), summary, amount, amount, BigDecimal.ZERO,
-                    null, dueDate, pixData, Collections.singletonList(renewalItem));
+                    null, dueDate, pixData, Collections.singletonList(renewalItem), orderIdempotencyKey);
             if (order == null) {
                 return SubscriptionResult.failure("Erro ao criar pedido de renovação no banco de dados.");
             }
@@ -320,7 +351,14 @@ public final class SubscriptionManager {
             Payment payment = new Payment(
                     pixData.getPaymentId(), pixData.getPaymentId(), PaymentStatus.PENDING,
                     pixData.getQrCode(), pixData.getQrCode(), null, dueDate);
-            OrderManager.savePayment(payment, order.getId(), amount);
+            if (!OrderManager.savePayment(payment, order.getId(), amount)) {
+                AutoPix plugin = AutoPix.getInstance();
+                if (plugin != null) {
+                    plugin.getLogger().severe("Pagamento PIX da renovacao " + normSubId + " ciclo " + nextCycle
+                            + " foi criado, mas o registro auxiliar autopix_payments falhou. "
+                            + "A fatura sera persistida e o PIX sera recuperavel pelo pedido.");
+                }
+            }
 
             String invoiceId = reusableFailedInvoiceId != null
                     ? reusableFailedInvoiceId
