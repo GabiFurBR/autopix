@@ -47,6 +47,7 @@ import io.github.warleysr.autopix.mercadopago.MercadoPagoAPI;
 import io.github.warleysr.autopix.mercadopago.WebhookValidator;
 import io.github.warleysr.autopix.qrcode.ImageCreator;
 import io.github.warleysr.autopix.qrcode.PixGenerator;
+import io.github.warleysr.autopix.subscription.SubscriptionInvoice;
 import io.github.warleysr.autopix.subscription.SubscriptionManager;
 
 /**
@@ -604,6 +605,39 @@ public final class AutoPixAPI {
             return future;
         }
         runAsyncOrNow(plugin, () -> completeOnMainThread(plugin, future, SubscriptionManager.createSubscription(uuid, productId, planId)));
+        return future;
+    }
+
+    public static CompletionStage<SubscriptionResult> renewSubscription(String subscriptionId) {
+        CompletableFuture<SubscriptionResult> future = new CompletableFuture<>();
+        AutoPix plugin = AutoPix.getInstance();
+        if (!isAvailable()) {
+            completeOnMainThread(plugin, future, SubscriptionResult.failure("service_unavailable"));
+            return future;
+        }
+        runAsyncOrNow(plugin, () -> completeOnMainThread(plugin, future, SubscriptionManager.renewSubscription(subscriptionId)));
+        return future;
+    }
+
+    public static CompletionStage<SubscriptionResult> payOrRenewSubscription(String subscriptionId) {
+        CompletableFuture<SubscriptionResult> future = new CompletableFuture<>();
+        AutoPix plugin = AutoPix.getInstance();
+        if (!isAvailable()) {
+            completeOnMainThread(plugin, future, SubscriptionResult.failure("service_unavailable"));
+            return future;
+        }
+        runAsyncOrNow(plugin, () -> completeOnMainThread(plugin, future, SubscriptionManager.payOrRenewSubscription(subscriptionId)));
+        return future;
+    }
+
+    public static CompletionStage<List<SubscriptionInvoice>> getSubscriptionInvoices(String subscriptionId) {
+        CompletableFuture<List<SubscriptionInvoice>> future = new CompletableFuture<>();
+        AutoPix plugin = AutoPix.getInstance();
+        if (!isAvailable()) {
+            completeOnMainThread(plugin, future, Collections.emptyList());
+            return future;
+        }
+        runAsyncOrNow(plugin, () -> completeOnMainThread(plugin, future, SubscriptionManager.getSubscriptionInvoices(subscriptionId)));
         return future;
     }
 

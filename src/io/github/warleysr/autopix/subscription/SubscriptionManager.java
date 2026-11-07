@@ -203,7 +203,8 @@ public final class SubscriptionManager {
     }
 
     /**
-     * Generates a new renewal invoice and real PIX charge for the next cycle of an active/past_due subscription.
+     * Generates a new renewal invoice and real PIX charge for the next cycle of an active/past_due subscription,
+     * or returns the existing pending renewal invoice/charge idempotently without creating duplicate charges.
      * Does NOT mark the invoice as PAID and does NOT extend current_period_end until the payment is confirmed.
      */
     public static SubscriptionResult renewSubscription(String subscriptionId) {
@@ -229,32 +230,64 @@ public final class SubscriptionManager {
             String duration = offer != null && offer.getDurationString() != null ? offer.getDurationString() : "30d";
             BigDecimal amount = sub.getAmount().setScale(2, RoundingMode.HALF_UP);
 
-            int nextCycle;
+            SubscriptionInvoice openPendingInvoice = null;
+            String reusableFailedInvoiceId = null;
+            int nextCycle = 2;
+
             try (Connection connection = OrderManager.getConnection()) {
-                // Prevent duplicate open renewal invoices for the same cycle
-                String checkOpenSql = "SELECT invoice_id, cycle_number FROM autopix_subscription_invoices "
-                        + "WHERE subscription_id = ? AND status = 'PENDING';";
+                String checkOpenSql = "SELECT * FROM autopix_subscription_invoices "
+                        + "WHERE subscription_id = ? AND status = 'PENDING' ORDER BY cycle_number DESC LIMIT 1;";
                 try (PreparedStatement checkStmt = connection.prepareStatement(checkOpenSql)) {
                     checkStmt.setString(1, normSubId);
                     try (ResultSet rs = checkStmt.executeQuery()) {
                         if (rs.next()) {
-                            return SubscriptionResult.failure("Já existe uma fatura de renovação pendente ("
-                                    + rs.getString("invoice_id") + ") para o ciclo #" + rs.getInt("cycle_number") + ".");
+                            openPendingInvoice = readInvoice(rs);
                         }
                     }
                 }
 
-                String maxCycleSql = "SELECT COALESCE(MAX(cycle_number), 0) AS max_cycle "
-                        + "FROM autopix_subscription_invoices WHERE subscription_id = ?;";
-                try (PreparedStatement maxStmt = connection.prepareStatement(maxCycleSql)) {
-                    maxStmt.setString(1, normSubId);
-                    try (ResultSet rs = maxStmt.executeQuery()) {
-                        nextCycle = (rs.next() ? rs.getInt("max_cycle") : 1) + 1;
+                if (openPendingInvoice == null) {
+                    String latestSql = "SELECT invoice_id, cycle_number, status FROM autopix_subscription_invoices "
+                            + "WHERE subscription_id = ? ORDER BY cycle_number DESC LIMIT 1;";
+                    try (PreparedStatement latestStmt = connection.prepareStatement(latestSql)) {
+                        latestStmt.setString(1, normSubId);
+                        try (ResultSet rs = latestStmt.executeQuery()) {
+                            if (rs.next()) {
+                                int latestCycle = rs.getInt("cycle_number");
+                                String latestStatus = rs.getString("status");
+                                if (latestStatus != null && !"PAID".equalsIgnoreCase(latestStatus.trim())) {
+                                    nextCycle = Math.max(1, latestCycle);
+                                    reusableFailedInvoiceId = rs.getString("invoice_id");
+                                } else {
+                                    nextCycle = Math.max(1, latestCycle) + 1;
+                                }
+                            }
+                        }
                     }
                 }
             } catch (SQLException ex) {
                 logError("Erro ao verificar ciclo de renovação da assinatura #" + normSubId, ex);
                 return SubscriptionResult.failure("Erro ao verificar ciclo de renovação: " + ex.getMessage());
+            }
+
+            if (openPendingInvoice != null) {
+                Order existingOrder = openPendingInvoice.getOrderId() != null
+                        ? OrderManager.getOrderById(openPendingInvoice.getOrderId())
+                        : null;
+                Payment existingPayment = openPendingInvoice.getOrderId() != null
+                        ? OrderManager.getPaymentByOrderId(openPendingInvoice.getOrderId())
+                        : null;
+                if (existingOrder != null
+                        && existingOrder.getStatus() != OrderStatus.CANCELLED
+                        && existingOrder.getStatus() != OrderStatus.EXPIRED
+                        && existingOrder.getStatus() != OrderStatus.FAILED
+                        && existingPayment != null) {
+                    return SubscriptionResult.success(
+                            sub, openPendingInvoice, existingOrder, existingPayment,
+                            "Cobrança de renovação pendente recuperada para pagamento.");
+                }
+                reusableFailedInvoiceId = openPendingInvoice.getInvoiceId();
+                nextCycle = openPendingInvoice.getCycleNumber();
             }
 
             Instant now = Instant.now();
@@ -266,7 +299,10 @@ public final class SubscriptionManager {
                             1, amount, amount, "autopix", null, duration, Collections.emptyList(), Collections.emptyList());
 
             String summary = truncate("Renovação " + sub.getProductId() + " (Ciclo #" + nextCycle + ")", 64);
-            String idempotencyKey = "sub_charge_" + normSubId + "_cycle_" + nextCycle;
+            String idempotencyKey = reusableFailedInvoiceId == null
+                    ? "sub_charge_" + normSubId + "_cycle_" + nextCycle
+                    : "sub_charge_" + normSubId + "_cycle_" + nextCycle + "_retry_"
+                            + UUID.randomUUID().toString().replace("-", "").substring(0, 8);
 
             PixData pixData = createProviderOrLocalCharge(playerName, summary, amount, normSubId, idempotencyKey);
             if (pixData == null) {
@@ -285,26 +321,47 @@ public final class SubscriptionManager {
                     pixData.getQrCode(), pixData.getQrCode(), null, dueDate);
             OrderManager.savePayment(payment, order.getId(), amount);
 
-            String invoiceId = "inv_" + UUID.randomUUID().toString().replace("-", "").substring(0, 16);
-            String insertInvoiceSql = "INSERT INTO autopix_subscription_invoices "
-                    + "(invoice_id, subscription_id, cycle_number, order_id, provider_payment_id, amount, currency, status, "
-                    + "billing_date, due_date, paid_at, created_at) "
-                    + "VALUES (?, ?, ?, ?, ?, ?, 'BRL', 'PENDING', ?, ?, NULL, ?);";
+            String invoiceId = reusableFailedInvoiceId != null
+                    ? reusableFailedInvoiceId
+                    : "inv_" + UUID.randomUUID().toString().replace("-", "").substring(0, 16);
 
             try (Connection connection = OrderManager.getConnection()) {
                 connection.setAutoCommit(false);
                 try {
-                    try (PreparedStatement invStmt = connection.prepareStatement(insertInvoiceSql)) {
-                        invStmt.setString(1, invoiceId);
-                        invStmt.setString(2, normSubId);
-                        invStmt.setInt(3, nextCycle);
-                        invStmt.setInt(4, order.getId());
-                        invStmt.setString(5, pixData.getPaymentId());
-                        invStmt.setBigDecimal(6, amount);
-                        invStmt.setTimestamp(7, Timestamp.from(now));
-                        invStmt.setTimestamp(8, Timestamp.from(dueDate));
-                        invStmt.setTimestamp(9, Timestamp.from(now));
-                        invStmt.executeUpdate();
+                    if (reusableFailedInvoiceId != null) {
+                        String updateInvoiceSql = "UPDATE autopix_subscription_invoices "
+                                + "SET order_id = ?, provider_payment_id = ?, amount = ?, status = 'PENDING', "
+                                + "billing_date = ?, due_date = ? "
+                                + "WHERE invoice_id = ? AND status <> 'PAID';";
+                        try (PreparedStatement updStmt = connection.prepareStatement(updateInvoiceSql)) {
+                            updStmt.setInt(1, order.getId());
+                            updStmt.setString(2, pixData.getPaymentId());
+                            updStmt.setBigDecimal(3, amount);
+                            updStmt.setTimestamp(4, Timestamp.from(now));
+                            updStmt.setTimestamp(5, Timestamp.from(dueDate));
+                            updStmt.setString(6, invoiceId);
+                            if (updStmt.executeUpdate() <= 0) {
+                                connection.rollback();
+                                return SubscriptionResult.failure("Não foi possível atualizar a fatura de renovação.");
+                            }
+                        }
+                    } else {
+                        String insertInvoiceSql = "INSERT INTO autopix_subscription_invoices "
+                                + "(invoice_id, subscription_id, cycle_number, order_id, provider_payment_id, amount, currency, status, "
+                                + "billing_date, due_date, paid_at, created_at) "
+                                + "VALUES (?, ?, ?, ?, ?, ?, 'BRL', 'PENDING', ?, ?, NULL, ?);";
+                        try (PreparedStatement invStmt = connection.prepareStatement(insertInvoiceSql)) {
+                            invStmt.setString(1, invoiceId);
+                            invStmt.setString(2, normSubId);
+                            invStmt.setInt(3, nextCycle);
+                            invStmt.setInt(4, order.getId());
+                            invStmt.setString(5, pixData.getPaymentId());
+                            invStmt.setBigDecimal(6, amount);
+                            invStmt.setTimestamp(7, Timestamp.from(now));
+                            invStmt.setTimestamp(8, Timestamp.from(dueDate));
+                            invStmt.setTimestamp(9, Timestamp.from(now));
+                            invStmt.executeUpdate();
+                        }
                     }
                     connection.commit();
                 } catch (SQLException ex) {
@@ -327,6 +384,35 @@ public final class SubscriptionManager {
                     currentSub, invoice, order, payment,
                     "Cobrança de renovação gerada com status PENDENTE. O período será estendido após o pagamento.");
         }
+    }
+
+    /**
+     * Allows a player to pay an initial pending subscription invoice or renew an active/past-due subscription.
+     */
+    public static SubscriptionResult payOrRenewSubscription(String subscriptionId) {
+        if (subscriptionId == null || subscriptionId.trim().isEmpty()) {
+            return SubscriptionResult.failure("ID de assinatura inválido.");
+        }
+        String normSubId = subscriptionId.trim();
+        Subscription sub = getSubscription(normSubId);
+        if (sub == null) {
+            return SubscriptionResult.failure("Assinatura não encontrada.");
+        }
+        if (sub.getStatus() == SubscriptionStatus.PENDING) {
+            List<SubscriptionInvoice> invoices = getSubscriptionInvoices(normSubId);
+            for (SubscriptionInvoice inv : invoices) {
+                if ("PENDING".equalsIgnoreCase(inv.getStatus()) && inv.getOrderId() != null) {
+                    Order order = OrderManager.getOrderById(inv.getOrderId());
+                    Payment payment = OrderManager.getPaymentByOrderId(inv.getOrderId());
+                    if (order != null && payment != null) {
+                        return SubscriptionResult.success(
+                                sub, inv, order, payment,
+                                "Fatura inicial pendente recuperada para pagamento.");
+                    }
+                }
+            }
+        }
+        return renewSubscription(normSubId);
     }
 
     /**
@@ -489,15 +575,58 @@ public final class SubscriptionManager {
     }
 
     public static void processDueSubscriptions() {
-        String sql = "SELECT subscription_id, player_uuid FROM autopix_subscriptions "
-                + "WHERE status = 'PAST_DUE' AND grace_until IS NOT NULL AND grace_until < CURRENT_TIMESTAMP;";
         Instant now = Instant.now();
+        List<String> dueActiveSubIds = new ArrayList<>();
+
+        String dueActiveSql = "SELECT subscription_id, current_period_end, next_billing_at "
+                + "FROM autopix_subscriptions WHERE status = 'ACTIVE';";
         try (Connection connection = OrderManager.getConnection();
-             PreparedStatement stmt = connection.prepareStatement(sql);
+             PreparedStatement stmt = connection.prepareStatement(dueActiveSql);
+             ResultSet rs = stmt.executeQuery()) {
+            while (rs.next()) {
+                String subId = rs.getString("subscription_id");
+                Instant periodEnd = parseSqlTimestamp(rs, "current_period_end");
+                Instant nextBilling = parseSqlTimestamp(rs, "next_billing_at");
+                Instant effectiveDue = periodEnd != null ? periodEnd : nextBilling;
+                if (subId != null && effectiveDue != null && !effectiveDue.isAfter(now)) {
+                    dueActiveSubIds.add(subId);
+                }
+            }
+        } catch (SQLException ex) {
+            logError("Erro ao consultar assinaturas ativas vencidas", ex);
+            return;
+        }
+
+        Timestamp graceUntilTs = Timestamp.from(now.plus(DEFAULT_GRACE_PERIOD_DAYS, ChronoUnit.DAYS));
+        for (String subId : dueActiveSubIds) {
+            boolean movedToPastDue = false;
+            try (Connection connection = OrderManager.getConnection();
+                 PreparedStatement upd = connection.prepareStatement(
+                         "UPDATE autopix_subscriptions SET status = 'PAST_DUE', grace_until = COALESCE(grace_until, ?), updated_at = ? "
+                                 + "WHERE subscription_id = ? AND status = 'ACTIVE';")) {
+                upd.setTimestamp(1, graceUntilTs);
+                upd.setTimestamp(2, Timestamp.from(now));
+                upd.setString(3, subId);
+                movedToPastDue = upd.executeUpdate() > 0;
+            } catch (SQLException ex) {
+                logError("Erro ao mover assinatura vencida #" + subId + " para PAST_DUE", ex);
+            }
+            if (movedToPastDue) {
+                renewSubscription(subId);
+            }
+        }
+
+        String pastDueSql = "SELECT subscription_id, player_uuid, grace_until FROM autopix_subscriptions "
+                + "WHERE status = 'PAST_DUE' AND grace_until IS NOT NULL;";
+        try (Connection connection = OrderManager.getConnection();
+             PreparedStatement stmt = connection.prepareStatement(pastDueSql);
              ResultSet rs = stmt.executeQuery()) {
             List<String[]> toSuspend = new ArrayList<>();
             while (rs.next()) {
-                toSuspend.add(new String[]{rs.getString("subscription_id"), rs.getString("player_uuid")});
+                Instant graceUntil = parseSqlTimestamp(rs, "grace_until");
+                if (graceUntil != null && graceUntil.isBefore(now)) {
+                    toSuspend.add(new String[]{rs.getString("subscription_id"), rs.getString("player_uuid")});
+                }
             }
             for (String[] entry : toSuspend) {
                 String subId = entry[0];
@@ -523,11 +652,47 @@ public final class SubscriptionManager {
         }
     }
 
+    private static Instant parseSqlTimestamp(ResultSet rs, String column) throws SQLException {
+        try {
+            Timestamp ts = rs.getTimestamp(column);
+            if (ts != null) {
+                return ts.toInstant();
+            }
+        } catch (SQLException ignored) {
+        }
+        String raw = rs.getString(column);
+        if (raw == null || raw.trim().isEmpty()) {
+            return null;
+        }
+        String trimmed = raw.trim();
+        try {
+            return Instant.ofEpochMilli(Long.parseLong(trimmed));
+        } catch (NumberFormatException ignored) {
+        }
+        try {
+            return Instant.parse(trimmed);
+        } catch (Exception ignored) {
+        }
+        try {
+            return Timestamp.valueOf(trimmed).toInstant();
+        } catch (Exception ignored) {
+            return null;
+        }
+    }
+
     public static void onOrderPaymentFailed(int orderId, String failureStatus, String reason) {
         if (orderId <= 0) return;
         SubscriptionInvoice invoice = getInvoiceByOrderId(orderId);
         if (invoice != null && "PENDING".equalsIgnoreCase(invoice.getStatus())) {
-            handleSubscriptionPaymentFailure(invoice.getSubscriptionId(), invoice.getInvoiceId(), failureStatus, reason);
+            String effectiveStatus = failureStatus;
+            if (effectiveStatus != null && reason != null) {
+                String upperReason = reason.trim().toUpperCase(Locale.ROOT);
+                if (upperReason.equals("CANCELLED") || upperReason.equals("EXPIRED")
+                        || upperReason.equals("REJECTED") || upperReason.endsWith("_MISMATCH")) {
+                    effectiveStatus = reason;
+                }
+            }
+            handleSubscriptionPaymentFailure(invoice.getSubscriptionId(), invoice.getInvoiceId(), effectiveStatus, reason);
         }
     }
 

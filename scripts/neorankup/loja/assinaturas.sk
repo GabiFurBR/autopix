@@ -35,9 +35,17 @@ function renderMenuAssinaturas(p: player, subs: object):
                     set {_valor} to {_sub}.getAmount()
                     set {_freq} to {_sub}.getFrequency()
                     set {_statusFormatado} to formatarStatus({_status})
-                    format gui slot {_slot} with nether star named "&6&lAssinatura: &f%{_prod}%" with lore "", "&7ID: &8%{_subId}%", "&7Valor: &aR$ %{_valor}% &8(%{_freq}%)", "&7Status: %{_statusFormatado}%", "", "&c» Clique para Cancelar Assinatura":
-                        set {_cancelFuture} to AutoPixAPI.cancelSubscription({_subId}, false)
-                        {_cancelFuture}.thenAccept({_res} -> handleCancelSubscriptionUi({_p}, {_res}))
+                    format gui slot {_slot} with nether star named "&6&lAssinatura: &f%{_prod}%" with lore "", "&7ID: &8%{_subId}%", "&7Valor: &aR$ %{_valor}% &8(%{_freq}%)", "&7Status: %{_statusFormatado}%", "", "&a» Clique Esquerdo para Pagar ou Renovar", "&c» Clique Direito para Cancelar Assinatura":
+                        if gui click type is right mouse button:
+                            set {_cancelFuture} to AutoPixAPI.cancelSubscription({_subId}, false)
+                            {_cancelFuture}.thenAccept({_res} -> handleCancelSubscriptionUi({_p}, {_res}))
+                        else:
+                            if {_status} is "PENDING":
+                                set {_payFuture} to AutoPixAPI.payOrRenewSubscription({_subId})
+                                {_payFuture}.thenAccept({_res} -> handleSubscriptionCheckoutResult({_p}, {_res}))
+                            else:
+                                set {_renewFuture} to AutoPixAPI.renewSubscription({_subId})
+                                {_renewFuture}.thenAccept({_res} -> handleSubscriptionCheckoutResult({_p}, {_res}))
                     add 1 to {_idx}
         format gui slot 40 with arrow named "&c&l« Voltar ao Menu Principal":
             abrirMenuPrincipal({_p})
