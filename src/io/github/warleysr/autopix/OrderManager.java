@@ -359,8 +359,10 @@ public class OrderManager {
                                             String couponCode, Instant expiresAt, PixData pixData, List<OrderItem> items,
                                             String idempotencyKey) {
         if (playerName == null || product == null || product.trim().isEmpty()) return null;
-        BigDecimal finalPrice = price != null ? price.setScale(2, RoundingMode.HALF_UP) : BigDecimal.ZERO;
-        if (finalPrice.compareTo(new BigDecimal("0.01")) < 0) return null;
+        if (price == null || price.compareTo(new BigDecimal("0.01")) < 0 || price.stripTrailingZeros().scale() > 2) {
+            return null;
+        }
+        BigDecimal finalPrice = price.setScale(2, RoundingMode.UNNECESSARY);
 
         String normalizedIdempKey = (idempotencyKey != null && !idempotencyKey.trim().isEmpty())
                 ? idempotencyKey.trim()
@@ -418,6 +420,7 @@ public class OrderManager {
                 order.setId(orderId);
                 order.setCouponSnapshot(couponCode);
                 order.setExpiresAt(expiresAt);
+                order.setIdempotencyKey(normalizedIdempKey);
 
                 if (pixData != null) {
                     pixData.setOrderId(orderId);
@@ -507,9 +510,16 @@ public class OrderManager {
      */
     public static Order createOrderWithItems(String playerName, String product, float price,
                                              PixData pixData, List<OrderItem> items) {
-        BigDecimal decPrice = BigDecimal.valueOf(roundPrice(price)).setScale(2, RoundingMode.HALF_UP);
+        if (!Float.isFinite(price) || price < 0.01f) return null;
+        BigDecimal decPrice = new BigDecimal(Float.toString(price)).setScale(2, RoundingMode.HALF_UP);
+        return createOrderWithItems(playerName, product, decPrice, pixData, items);
+    }
+
+    public static Order createOrderWithItems(String playerName, String product, BigDecimal price,
+                                             PixData pixData, List<OrderItem> items) {
+        if (price == null) return null;
         UUID playerUuid = getOnlinePlayerUuid(playerName);
-        return createOrderDetailed(playerName, playerUuid, product, decPrice, decPrice, BigDecimal.ZERO, null, null, pixData, items);
+        return createOrderDetailed(playerName, playerUuid, product, price, price, BigDecimal.ZERO, null, null, pixData, items);
     }
 
     private static String encodeStringList(List<String> values) {
@@ -744,13 +754,17 @@ public class OrderManager {
         String playerName = result.getString("player");
         String productName = result.getString("product");
         BigDecimal priceDec = result.getBigDecimal("price");
-        float price = priceDec != null ? priceDec.floatValue() : roundPrice(result.getDouble("price"));
-        Order order = new Order(playerName, productName, price, createdMillis);
-        if (priceDec != null) {
-            order.setTotal(priceDec.setScale(2, RoundingMode.HALF_UP));
-        }
+        BigDecimal normalizedPrice = priceDec != null
+                ? priceDec.setScale(2, RoundingMode.HALF_UP)
+                : BigDecimal.valueOf(result.getDouble("price")).setScale(2, RoundingMode.HALF_UP);
+        Order order = new Order(playerName, null, productName, normalizedPrice, normalizedPrice,
+                BigDecimal.ZERO.setScale(2, RoundingMode.HALF_UP), createdMillis);
         order.setId(result.getInt("id"));
         order.setTransaction(result.getString("pix"));
+        try {
+            order.setIdempotencyKey(result.getString("idempotency_key"));
+        } catch (SQLException ignored) {
+        }
 
         String uuidStr = result.getString("player_uuid");
         if (uuidStr != null && !uuidStr.trim().isEmpty()) {

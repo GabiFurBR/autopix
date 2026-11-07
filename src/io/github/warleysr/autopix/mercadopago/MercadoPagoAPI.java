@@ -54,8 +54,10 @@ public class MercadoPagoAPI {
     @SuppressWarnings("unchecked")
     public static String buildCreatePaymentJson(String playerName, String productName,
                                                 float price, String notificationUrl) {
-        BigDecimal roundedPrice = BigDecimal.valueOf(Double.parseDouble(Float.toString(price)))
-                .setScale(2, RoundingMode.HALF_UP);
+        if (!Float.isFinite(price)) {
+            throw new IllegalArgumentException("O valor do pagamento deve ser finito.");
+        }
+        BigDecimal roundedPrice = new BigDecimal(Float.toString(price));
         return buildCreatePaymentJson(playerName, productName, roundedPrice, playerName, notificationUrl);
     }
 
@@ -63,6 +65,9 @@ public class MercadoPagoAPI {
     public static String buildCreatePaymentJson(String playerName, String productName,
                                                 BigDecimal price, String externalReference,
                                                 String notificationUrl) {
+        if (price == null || price.compareTo(new BigDecimal("0.01")) < 0 || price.stripTrailingZeros().scale() > 2) {
+            throw new IllegalArgumentException("O valor do pagamento deve ser positivo e possuir no maximo 2 casas decimais.");
+        }
         JSONObject payer = new JSONObject();
         payer.put("entity_type", "individual");
         payer.put("type", "customer");
@@ -70,9 +75,7 @@ public class MercadoPagoAPI {
         if (safeUser.isEmpty()) safeUser = "player";
         payer.put("email", safeUser + "@autopix.com");
 
-        BigDecimal roundedPrice = price != null
-                ? price.setScale(2, RoundingMode.HALF_UP)
-                : BigDecimal.ZERO.setScale(2, RoundingMode.HALF_UP);
+        BigDecimal roundedPrice = price.setScale(2, RoundingMode.UNNECESSARY);
 
         JSONObject root = new JSONObject();
         root.put("description", productName != null ? productName : "Produto");
@@ -109,28 +112,35 @@ public class MercadoPagoAPI {
     public static PixData createPixPayment(AutoPix ap, String playerName, String productName,
                                            float price, String idempotencyKey) throws Exception {
         if (!Float.isFinite(price) || price < 0.01f) return null;
-        BigDecimal bdPrice = BigDecimal.valueOf(Double.parseDouble(Float.toString(price)))
-                .setScale(2, RoundingMode.HALF_UP);
+        BigDecimal bdPrice = new BigDecimal(Float.toString(price));
         return createPixPayment(ap, playerName, productName, bdPrice, playerName, idempotencyKey);
+    }
+
+    public static PixData createPixPayment(AutoPix ap, String playerName, String productName,
+                                           BigDecimal price, String idempotencyKey) throws Exception {
+        return createPixPayment(ap, playerName, productName, price, playerName, idempotencyKey);
     }
 
     public static PixData createPixPayment(AutoPix ap, String playerName, String productName,
                                            BigDecimal price, String externalReference,
                                            String idempotencyKey) throws Exception {
         if (playerName == null || productName == null || productName.trim().isEmpty()
-                || price == null || price.compareTo(new BigDecimal("0.01")) < 0) {
+                || price == null || price.compareTo(new BigDecimal("0.01")) < 0
+                || price.stripTrailingZeros().scale() > 2) {
             return null;
         }
+
+        BigDecimal normalizedPrice = price.setScale(2, RoundingMode.UNNECESSARY);
 
         PaymentCreationProvider override = creationOverride;
         if (override != null) {
             return override.createPayment(ap, playerName, productName,
-                    price.setScale(2, RoundingMode.HALF_UP), externalReference, idempotencyKey);
+                    normalizedPrice, externalReference, idempotencyKey);
         }
 
         if (ap == null) return null;
         String notificationUrl = ap.getConfig().getString("automatico.notificacoes", null);
-        String jsonBody = buildCreatePaymentJson(playerName, productName, price, externalReference, notificationUrl);
+        String jsonBody = buildCreatePaymentJson(playerName, productName, normalizedPrice, externalReference, notificationUrl);
 
         HttpURLConnection connection = (HttpURLConnection) URI.create(API_URL).toURL().openConnection();
         try {

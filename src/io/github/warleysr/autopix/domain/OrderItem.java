@@ -36,8 +36,13 @@ public final class OrderItem {
                      List<String> preCommands, List<String> commands) {
         this(product, "default", product, null, "general", "one_time", null, "BRL",
                 quantity,
-                BigDecimal.valueOf(unitPrice).setScale(2, RoundingMode.HALF_UP),
-                BigDecimal.valueOf(unitPrice).multiply(BigDecimal.valueOf(quantity)).setScale(2, RoundingMode.HALF_UP),
+                Float.isFinite(unitPrice)
+                        ? new BigDecimal(Float.toString(unitPrice)).setScale(2, RoundingMode.HALF_UP)
+                        : BigDecimal.ZERO.setScale(2, RoundingMode.HALF_UP),
+                Float.isFinite(unitPrice)
+                        ? new BigDecimal(Float.toString(unitPrice)).setScale(2, RoundingMode.HALF_UP)
+                                .multiply(BigDecimal.valueOf(Math.max(1, quantity))).setScale(2, RoundingMode.HALF_UP)
+                        : BigDecimal.ZERO.setScale(2, RoundingMode.HALF_UP),
                 "autopix", null, null, preCommands, commands);
     }
 

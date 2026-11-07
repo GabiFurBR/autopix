@@ -28,12 +28,13 @@ public class Order {
     private Instant updatedAt;
     private Instant expiresAt;
     private String transaction;
+    private String idempotencyKey;
     private List<OrderItem> items = new ArrayList<>();
 
     public Order(String player, String product, float value, long created) {
         this(player, null, product,
-                BigDecimal.valueOf(value).setScale(2, RoundingMode.HALF_UP),
-                BigDecimal.valueOf(value).setScale(2, RoundingMode.HALF_UP),
+                Float.isFinite(value) ? new BigDecimal(Float.toString(value)).setScale(2, RoundingMode.HALF_UP) : BigDecimal.ZERO.setScale(2, RoundingMode.HALF_UP),
+                Float.isFinite(value) ? new BigDecimal(Float.toString(value)).setScale(2, RoundingMode.HALF_UP) : BigDecimal.ZERO.setScale(2, RoundingMode.HALF_UP),
                 BigDecimal.ZERO.setScale(2, RoundingMode.HALF_UP),
                 created);
     }
@@ -169,6 +170,14 @@ public class Order {
         if (transaction != null) {
             this.status = OrderStatus.PAID;
         }
+    }
+
+    public String getIdempotencyKey() {
+        return idempotencyKey;
+    }
+
+    public void setIdempotencyKey(String idempotencyKey) {
+        this.idempotencyKey = idempotencyKey;
     }
 
     public boolean isValidated() {

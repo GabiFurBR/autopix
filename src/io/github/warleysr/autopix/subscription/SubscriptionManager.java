@@ -973,7 +973,7 @@ public final class SubscriptionManager {
         String pixName = AutoPix.getPixName() != null ? AutoPix.getPixName() : "AutoPix";
         String qr;
         try {
-            qr = PixGenerator.generatePayload(pixKey, pixName, summary, price.floatValue());
+            qr = PixGenerator.generatePayload(pixKey, pixName, summary, price);
         } catch (Exception ex) {
             qr = "00020101021226580014BR.GOV.BCB.PIX01" + idempotencyKey;
         }

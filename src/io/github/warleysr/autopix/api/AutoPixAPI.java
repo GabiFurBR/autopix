@@ -275,9 +275,9 @@ public final class AutoPixAPI {
                 }
 
                 final BigDecimal total = calcTotal;
-                if (total.compareTo(new BigDecimal("0.01")) < 0) {
+                if (!PixGenerator.isValidCurrencyAmount(total)) {
                     completeOnMainThread(plugin, future,
-                            OrderCreationResult.failure("invalid_total", "O valor total do pedido deve ser de pelo menos R$ 0,01."));
+                            OrderCreationResult.failure("invalid_total", "O valor total do pedido deve ser de pelo menos R$ 0,01 e com no máximo 2 casas decimais."));
                     return;
                 }
 
@@ -296,7 +296,7 @@ public final class AutoPixAPI {
                 String paymentId = null;
 
                 if (automaticMode) {
-                    pixData = MercadoPagoAPI.createPixPayment(plugin, playerName, summary, total.floatValue(), idempotencyKey);
+                    pixData = MercadoPagoAPI.createPixPayment(plugin, playerName, summary, total, idempotencyKey);
                     if (pixData == null) {
                         completeOnMainThread(plugin, future,
                                 OrderCreationResult.failure("mercadopago_error", "Falha ao gerar cobrança no Mercado Pago."));
@@ -308,7 +308,7 @@ public final class AutoPixAPI {
                     try {
                         String pixKey = AutoPix.getPixKey() != null ? AutoPix.getPixKey() : "123456789";
                         String pixName = AutoPix.getPixName() != null ? AutoPix.getPixName() : "AutoPix";
-                        qrPayload = PixGenerator.generatePayload(pixKey, pixName, summary, total.floatValue());
+                        qrPayload = PixGenerator.generatePayload(pixKey, pixName, summary, total);
                     } catch (Exception ex) {
                         qrPayload = null;
                     }
