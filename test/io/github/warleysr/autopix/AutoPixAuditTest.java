@@ -10,8 +10,11 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.awt.image.BufferedImage;
 import java.io.File;
+import java.io.OutputStream;
 import java.lang.reflect.Method;
 import java.math.BigDecimal;
+import java.net.HttpURLConnection;
+import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -19,12 +22,16 @@ import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
+import java.sql.SQLException;
 import java.sql.Statement;
+import java.sql.Timestamp;
 import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
@@ -32,6 +39,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import com.zaxxer.hikari.HikariConfig;
@@ -76,6 +84,7 @@ import io.github.warleysr.autopix.domain.PaymentInfo;
 import io.github.warleysr.autopix.domain.PixData;
 import io.github.warleysr.autopix.events.AutoPixEventDispatcher;
 import io.github.warleysr.autopix.events.DeliveryCompletedEvent;
+import io.github.warleysr.autopix.events.DeliveryFailedEvent;
 import io.github.warleysr.autopix.events.DeliveryNeedsReviewEvent;
 import io.github.warleysr.autopix.events.DeliveryStartedEvent;
 import io.github.warleysr.autopix.events.OrderCreatedEvent;
@@ -86,9 +95,11 @@ import io.github.warleysr.autopix.events.SubscriptionCancelledEvent;
 import io.github.warleysr.autopix.events.SubscriptionCreatedEvent;
 import io.github.warleysr.autopix.events.SubscriptionPaymentFailedEvent;
 import io.github.warleysr.autopix.events.SubscriptionRenewedEvent;
+import io.github.warleysr.autopix.events.SubscriptionSuspendedEvent;
 import io.github.warleysr.autopix.expansion.AutoPixExpansion;
 import io.github.warleysr.autopix.inventory.InventoryManager;
 import io.github.warleysr.autopix.mercadopago.MercadoPagoAPI;
+import io.github.warleysr.autopix.mercadopago.WebhookHttpServer;
 import io.github.warleysr.autopix.mercadopago.WebhookValidator;
 import io.github.warleysr.autopix.qrcode.ImageCreator;
 import io.github.warleysr.autopix.qrcode.PixGenerator;
@@ -105,6 +116,8 @@ class AutoPixAuditTest {
 
     @BeforeEach
     void setUp() throws Exception {
+        OrderManager.setSimulatedMainThreadForTesting(null);
+        WebhookHttpServer.stop();
         sqliteFile = tempDir.resolve("autopix-test.db").toFile();
         initSqlitePool(sqliteFile);
         AutoPixEventDispatcher.clearTestListeners();
@@ -125,6 +138,8 @@ class AutoPixAuditTest {
 
     @AfterEach
     void tearDown() {
+        OrderManager.setSimulatedMainThreadForTesting(null);
+        WebhookHttpServer.stop();
         MercadoPagoAPI.clearTestOverrides();
         AutoPixAPI.setWebhookSecretForTesting(null);
         CartManager.clearAll();
@@ -978,11 +993,21 @@ class AutoPixAuditTest {
         }
         pool.shutdownNow();
 
-        // All 3 items delivered exactly once across all threads
-        assertEquals(3, totalDelivered.get(), "Cada um dos 3 itens deve ser entregue exatamente 1 vez.");
+        // Only the AUTOPIX item (index 0) completes automatically; SKRIPT (index 1) and HYBRID (index 2)
+        // must remain in STAGE_AWAITING_CONFIRMATION until explicitly confirmed with their claimToken.
+        assertEquals(1, totalDelivered.get(), "Apenas o item AUTOPIX completa sem confirmacao explicita do Skript.");
         assertEquals(2, executedCommands.size(), "Apenas os itens AUTOPIX e HYBRID possuem comandos de console.");
         assertEquals(3, startedEvents.size());
-        assertEquals(3, completedEvents.size());
+        assertEquals(1, completedEvents.size(), "Itens SKRIPT e HYBRID nao podem disparar DeliveryCompletedEvent antes da confirmacao.");
+
+        for (DeliveryStartedEvent started : startedEvents) {
+            if ("skript".equalsIgnoreCase(started.getDeliveryType()) || "hybrid".equalsIgnoreCase(started.getDeliveryType())) {
+                assertNotNull(started.getClaimToken());
+                assertTrue(DeliveryManager.confirmCustomDelivery(
+                        order.getId(), started.getItemIndex(), started.getClaimToken()));
+            }
+        }
+        assertEquals(3, completedEvents.size(), "Apos confirmacao explicita dos itens customizados, todos os 3 itens devem estar completos.");
     }
 
     @Test
@@ -1224,6 +1249,12 @@ class AutoPixAuditTest {
         assertNotNull(CheckoutRequest.class.getMethod("customDonation", UUID.class, BigDecimal.class));
         assertNotNull(PaymentApprovedEvent.class.getMethod("getPrice"));
         assertNotNull(DeliveryStartedEvent.class.getMethod("getDeliveryType"));
+        assertNotNull(DeliveryStartedEvent.class.getMethod("getClaimToken"));
+        assertNotNull(DeliveryStartedEvent.class.getMethod("getItemIndex"));
+        assertNotNull(AutoPixAPI.class.getMethod("confirmCustomDelivery", String.class, String.class, String.class));
+        assertNotNull(AutoPixAPI.class.getMethod("failCustomDelivery", String.class, String.class, String.class, String.class, boolean.class));
+        assertNotNull(AutoPixAPI.class.getMethod("renewSubscription", String.class));
+        assertNotNull(AutoPixAPI.class.getMethod("payOrRenewSubscription", String.class));
         assertNotNull(SubscriptionResult.class.getMethod("getOrder"));
         assertNotNull(SubscriptionResult.class.getMethod("getPayment"));
 
@@ -1232,6 +1263,516 @@ class AutoPixAuditTest {
             assertNotNull(CatalogManager.getCategory(catId), "Categoria obrigatoria ausente: " + catId);
             assertFalse(CatalogManager.getProductsByCategory(catId).isEmpty(),
                     "Categoria " + catId + " deve possuir produtos carregados.");
+        }
+    }
+
+    // =========================================================================
+    // 5. Critical Hardening & Reliability Regression Tests
+    // =========================================================================
+
+    @Test
+    void testWebhookTimestampSkewRejectsOldAndFutureSignatures() {
+        enableProviderHooks();
+        String secret = "mp_skew_test_secret";
+        AutoPixAPI.setWebhookSecretForTesting(secret);
+
+        String reqId = "req-skew-001";
+        String paymentId = "mp_pay_skew_1";
+        long nowSeconds = System.currentTimeMillis() / 1000L;
+
+        // 1. Expired timestamp (10 minutes ago > DEFAULT_MAX_SKEW_SECONDS = 300s) must be rejected by default
+        long oldTs = nowSeconds - 600L;
+        String oldSig = WebhookValidator.computeSignatureHeader(reqId, paymentId, oldTs, secret);
+        assertFalse(WebhookValidator.validateSignature(oldSig, reqId, paymentId, secret),
+                "Assinaturas de webhook expiradas devem ser rejeitadas por padrao.");
+
+        // 2. Future timestamp (10 minutes in the future > DEFAULT_MAX_SKEW_SECONDS = 300s) must be rejected by default
+        long futureTs = nowSeconds + 600L;
+        String futureSig = WebhookValidator.computeSignatureHeader(reqId, paymentId, futureTs, secret);
+        assertFalse(WebhookValidator.validateSignature(futureSig, reqId, paymentId, secret),
+                "Assinaturas de webhook com timestamp futuro fora da tolerancia devem ser rejeitadas.");
+
+        // 3.AutoPixAPI.processWebhookNotification must also reject old and future signatures
+        PixData pd = new PixData(paymentId, "QR_SKEW");
+        Order order = OrderManager.createOrderWithPixData("SkewPlayer", "VIP1", 25.00f, pd);
+        providerPayments.put(paymentId, new PaymentInfo(
+                paymentId, "E_SKEW_TX_1", "approved", new BigDecimal("25.00"), "BRL", Integer.toString(order.getId())));
+
+        assertFalse(AutoPixAPI.processWebhookNotification("payment", paymentId, "notif_old", oldSig, reqId, secret));
+        assertFalse(AutoPixAPI.processWebhookNotification("payment", paymentId, "notif_future", futureSig, reqId, secret));
+        assertFalse(OrderManager.getOrderById(order.getId()).isValidated());
+
+        // 4. Current timestamp within tolerance succeeds
+        String currentSig = WebhookValidator.computeSignatureHeader(reqId, paymentId, nowSeconds, secret);
+        assertTrue(WebhookValidator.validateSignature(currentSig, reqId, paymentId, secret));
+        assertTrue(AutoPixAPI.processWebhookNotification("payment", paymentId, "notif_current", currentSig, reqId, secret));
+        assertTrue(OrderManager.getOrderById(order.getId()).isValidated());
+    }
+
+    @Test
+    void testWebhookIdSeparationHttpStatusAndDuplicateProtection() throws Exception {
+        enableProviderHooks();
+        String secret = "mp_http_webhook_secret_2026";
+        AutoPixAPI.setWebhookSecretForTesting(secret);
+
+        // 1. Verify WebhookHttpServer.parseWebhookRequest separates notification ID, request ID, and payment data.id
+        URI sampleUri = URI.create("http://127.0.0.1:8090/autopix/webhook/mercadopago?data.id=777888999&id=111222333&type=payment");
+        String sampleBody = "{\"id\":999000111,\"type\":\"payment\",\"action\":\"payment.updated\",\"data\":{\"id\":\"777888999\"}}";
+        WebhookHttpServer.ParsedWebhookRequest parsed = WebhookHttpServer.parseWebhookRequest(sampleUri, sampleBody, "req-header-abc");
+        assertEquals("777888999", parsed.getDataId(), "data.id deve corresponder ao ID do pagamento.");
+        assertEquals("999000111", parsed.getNotificationId(), "notificationId deve corresponder ao ID da notificacao.");
+        assertEquals("req-header-abc", parsed.getRequestId(), "requestId deve corresponder ao header x-request-id.");
+        assertEquals("payment", parsed.getTopic());
+
+        // 2. Start real loopback WebhookHttpServer on ephemeral port and verify accurate HTTP status codes
+        assertTrue(WebhookHttpServer.startEndpoint(null, "127.0.0.1", 0, "/autopix/webhook/mercadopago"));
+        int port = WebhookHttpServer.getBoundPort();
+        assertTrue(port > 0);
+        URI endpoint = URI.create("http://127.0.0.1:" + port + "/autopix/webhook/mercadopago?data.id=mp_http_pay_1&id=notif_001&type=payment");
+
+        PixData pd = new PixData("mp_http_pay_1", "QR_HTTP_1");
+        Order order = OrderManager.createOrderWithPixData("HttpPlayer", "VIP1", 35.00f, pd);
+        assertNotNull(order);
+
+        long nowSeconds = System.currentTimeMillis() / 1000L;
+        String validSig = WebhookValidator.computeSignatureHeader("req-http-1", "mp_http_pay_1", nowSeconds, secret);
+        String bodyJson = "{\"id\":555666,\"type\":\"payment\",\"data\":{\"id\":\"mp_http_pay_1\"}}";
+
+        // 2a. Expired signature over HTTP -> 401
+        String expiredSig = WebhookValidator.computeSignatureHeader("req-http-1", "mp_http_pay_1", nowSeconds - 900L, secret);
+        assertEquals(401, postWebhookHttp(endpoint, expiredSig, "req-http-1", bodyJson));
+
+        // 2b. Transient provider failure (payment not found in provider yet) -> HTTP 500 (never silently 200!)
+        providerPayments.remove("mp_http_pay_1");
+        assertEquals(500, postWebhookHttp(endpoint, validSig, "req-http-1", bodyJson),
+                "Falha no processamento jamais pode retornar HTTP 200 silencioso.");
+        assertFalse(OrderManager.getOrderById(order.getId()).isValidated());
+
+        // 2c. Provider now returns approved payment -> retry returns HTTP 200 and validates order
+        List<PaymentApprovedEvent> approvedEvents = new CopyOnWriteArrayList<>();
+        AutoPixEventDispatcher.registerTestListener(ev -> {
+            if (ev instanceof PaymentApprovedEvent) approvedEvents.add((PaymentApprovedEvent) ev);
+        });
+
+        providerPayments.put("mp_http_pay_1", new PaymentInfo(
+                "mp_http_pay_1", "E_HTTP_TX_1", "approved",
+                new BigDecimal("35.00"), "BRL", Integer.toString(order.getId())));
+        assertEquals(200, postWebhookHttp(endpoint, validSig, "req-http-1", bodyJson));
+        assertTrue(OrderManager.getOrderById(order.getId()).isValidated());
+        assertEquals(1, approvedEvents.size());
+
+        // 2d. Duplicate webhook notifications (same notification ID, or new notification ID + new request ID for same payment)
+        // return 200 idempotently and NEVER duplicate PaymentApprovedEvent or rewards
+        assertEquals(200, postWebhookHttp(endpoint, validSig, "req-http-1", bodyJson));
+        String secondSig = WebhookValidator.computeSignatureHeader("req-http-2", "mp_http_pay_1", nowSeconds, secret);
+        String secondBody = "{\"id\":555667,\"type\":\"payment\",\"data\":{\"id\":\"mp_http_pay_1\"}}";
+        assertEquals(200, postWebhookHttp(endpoint, secondSig, "req-http-2", secondBody));
+        assertEquals(1, approvedEvents.size(), "Notificacoes duplicadas jamais podem duplicar aprovacao ou recompensas.");
+    }
+
+    private static int postWebhookHttp(URI uri, String xSignature, String xRequestId, String jsonBody) throws Exception {
+        HttpURLConnection conn = (HttpURLConnection) uri.toURL().openConnection();
+        try {
+            conn.setRequestMethod("POST");
+            conn.setDoOutput(true);
+            conn.setRequestProperty("Content-Type", "application/json");
+            if (xSignature != null) conn.setRequestProperty("x-signature", xSignature);
+            if (xRequestId != null) conn.setRequestProperty("x-request-id", xRequestId);
+            byte[] bytes = jsonBody.getBytes(StandardCharsets.UTF_8);
+            try (OutputStream os = conn.getOutputStream()) {
+                os.write(bytes);
+            }
+            return conn.getResponseCode();
+        } finally {
+            conn.disconnect();
+        }
+    }
+
+    @Test
+    void testSkriptCustomDeliveryRequiresExplicitConfirmationAndRejectsStaleOrDuplicateTokens() throws Exception {
+        UUID playerUuid = UUID.randomUUID();
+        List<OrderItem> items = List.of(
+                new OrderItem("custom_box", "default", "Caixa Misteriosa", "Boxes", "crates",
+                        "ONE_TIME", null, "BRL", 1,
+                        new BigDecimal("15.00"), new BigDecimal("15.00"),
+                        "skript", "mystery_box_handler", null,
+                        List.of(), List.of()));
+
+        PixData pd = new PixData("PAY-SKRIPT-CONFIRM", "QR-SKRIPT");
+        Order order = OrderManager.createOrderDetailed(
+                "SkriptPlayer", playerUuid, "Caixa Misteriosa",
+                new BigDecimal("15.00"), new BigDecimal("15.00"), BigDecimal.ZERO,
+                null, Instant.now().plusSeconds(1800), pd, items);
+        assertTrue(OrderManager.approvePayment(pd, order, "E_SKRIPT_TX_1"));
+
+        List<DeliveryStartedEvent> startedEvents = new ArrayList<>();
+        List<DeliveryCompletedEvent> completedEvents = new ArrayList<>();
+        AutoPixEventDispatcher.registerTestListener(ev -> {
+            if (ev instanceof DeliveryStartedEvent) startedEvents.add((DeliveryStartedEvent) ev);
+            if (ev instanceof DeliveryCompletedEvent) completedEvents.add((DeliveryCompletedEvent) ev);
+        });
+
+        // 1. Starting Skript delivery dispatches DeliveryStartedEvent with claimToken, but does NOT mark completed
+        int completedCount = DeliveryManager.processOrderDeliveryItemsSync(order, items, playerUuid, cmd -> {});
+        assertEquals(0, completedCount, "Iniciar entrega Skript jamais pode marca-la como concluida automaticamente.");
+        assertEquals(1, startedEvents.size());
+        assertEquals(0, completedEvents.size(), "DeliveryCompletedEvent nao pode ser disparado antes da confirmacao.");
+
+        DeliveryStartedEvent started = startedEvents.get(0);
+        String claimToken = started.getClaimToken();
+        assertNotNull(claimToken);
+        assertFalse(claimToken.isEmpty());
+
+        try (Connection conn = OrderManager.getConnection();
+             PreparedStatement stmt = conn.prepareStatement(
+                     "SELECT status, execution_stage, claim_token FROM autopix_deliveries WHERE order_id = ? AND item_index = 0;")) {
+            stmt.setInt(1, order.getId());
+            try (ResultSet rs = stmt.executeQuery()) {
+                assertTrue(rs.next());
+                assertEquals("processing", rs.getString("status"));
+                assertEquals(DeliveryManager.STAGE_AWAITING_CONFIRMATION, rs.getString("execution_stage"));
+                assertEquals(claimToken, rs.getString("claim_token"));
+            }
+        }
+
+        // 2. Stale / wrong token or wrong itemIndex must be rejected
+        assertFalse(DeliveryManager.confirmCustomDelivery(order.getId(), 0, "wrong_stale_token"));
+        assertFalse(DeliveryManager.confirmCustomDelivery(order.getId(), 99, claimToken));
+        assertEquals(0, completedEvents.size());
+
+        // 3. Valid confirmation via AutoPixAPI completes the delivery and dispatches DeliveryCompletedEvent once
+        assertTrue(AutoPixAPI.confirmCustomDelivery(
+                Integer.toString(order.getId()), "0", claimToken).toCompletableFuture().get());
+        assertEquals(1, completedEvents.size());
+        assertEquals(OrderStatus.DELIVERED, OrderManager.getOrderById(order.getId()).getStatus());
+
+        // 4. Duplicate confirmation with the same token returns false and does not dispatch a second event
+        assertFalse(DeliveryManager.confirmCustomDelivery(order.getId(), 0, claimToken));
+        assertEquals(1, completedEvents.size());
+    }
+
+    @Test
+    void testFailedCustomDeliveriesRemainRecoverableAndHybridPreventsDuplicateCommands() throws Exception {
+        UUID playerUuid = UUID.randomUUID();
+        List<OrderItem> items = List.of(
+                new OrderItem("skript_item", "default", "Recompensa Skript", "Recompensa", "gems",
+                        "ONE_TIME", null, "BRL", 1,
+                        new BigDecimal("10.00"), new BigDecimal("10.00"),
+                        "skript", "skript_only_handler", null,
+                        List.of(), List.of()),
+                new OrderItem("hybrid_item", "default", "VIP Hybrid", "VIP", "vips",
+                        "ONE_TIME", null, "BRL", 1,
+                        new BigDecimal("20.00"), new BigDecimal("20.00"),
+                        "hybrid", "hybrid_vip_handler", null,
+                        List.of(), List.of("lp user {player} parent add vip")));
+
+        PixData pd = new PixData("PAY-FAIL-RECOVER", "QR-FAIL-REC");
+        Order order = OrderManager.createOrderDetailed(
+                "RecoverPlayer", playerUuid, "Combo Custom",
+                new BigDecimal("30.00"), new BigDecimal("30.00"), BigDecimal.ZERO,
+                null, Instant.now().plusSeconds(1800), pd, items);
+        assertTrue(OrderManager.approvePayment(pd, order, "E_FAIL_REC_TX"));
+
+        List<DeliveryStartedEvent> startedEvents = new ArrayList<>();
+        List<DeliveryFailedEvent> failedEvents = new ArrayList<>();
+        List<DeliveryNeedsReviewEvent> reviewEvents = new ArrayList<>();
+        List<DeliveryCompletedEvent> completedEvents = new ArrayList<>();
+        List<String> executedCommands = new ArrayList<>();
+
+        AutoPixEventDispatcher.registerTestListener(ev -> {
+            if (ev instanceof DeliveryStartedEvent) startedEvents.add((DeliveryStartedEvent) ev);
+            if (ev instanceof DeliveryFailedEvent) failedEvents.add((DeliveryFailedEvent) ev);
+            if (ev instanceof DeliveryNeedsReviewEvent) reviewEvents.add((DeliveryNeedsReviewEvent) ev);
+            if (ev instanceof DeliveryCompletedEvent) completedEvents.add((DeliveryCompletedEvent) ev);
+        });
+
+        // 1. Start both items
+        DeliveryManager.processOrderDeliveryItemsSync(order, items, playerUuid, executedCommands::add);
+        assertEquals(2, startedEvents.size());
+        assertEquals(1, executedCommands.size(), "Comando do item hybrid foi executado.");
+
+        String skriptToken1 = startedEvents.get(0).getClaimToken();
+        String hybridToken1 = startedEvents.get(1).getClaimToken();
+
+        // 2. Fail both custom deliveries:
+        // - Item 0 (pure skript) had no console commands executed -> resets to 'pending' so it is recoverable!
+        // - Item 1 (hybrid) already executed console commands -> goes to 'needs_review' to prevent duplicate commands!
+        assertTrue(DeliveryManager.failCustomDelivery(order.getId(), 0, skriptToken1, "Erro temporario no Skript", true));
+        assertTrue(DeliveryManager.failCustomDelivery(order.getId(), 1, hybridToken1, "Erro no handler hybrid", true));
+        assertEquals(1, failedEvents.size());
+        assertEquals(1, reviewEvents.size());
+
+        // Stale token from failed attempt #1 cannot confirm anymore
+        assertFalse(DeliveryManager.confirmCustomDelivery(order.getId(), 0, skriptToken1));
+
+        // 3. Re-running delivery recovers Item 0 (skript) with a new claimToken and does NOT re-run Item 1's commands
+        startedEvents.clear();
+        DeliveryManager.processOrderDeliveryItemsSync(order, items, playerUuid, executedCommands::add);
+        assertEquals(1, startedEvents.size(), "O item Skript falho deve ser recuperavel em nova tentativa.");
+        assertEquals(1, executedCommands.size(), "O comando do item hybrid jamais pode ser executado em duplicidade.");
+
+        String skriptToken2 = startedEvents.get(0).getClaimToken();
+        assertNotEquals(skriptToken1, skriptToken2);
+        assertTrue(DeliveryManager.confirmCustomDelivery(order.getId(), 0, skriptToken2));
+        assertEquals(1, completedEvents.size());
+    }
+
+    @Test
+    void testDatabaseFailuresPreventRewardExecutionAndFalseCompletion() throws Exception {
+        UUID playerUuid = UUID.randomUUID();
+        List<OrderItem> items = List.of(
+                new OrderItem("db_fail_item", "default", "Pacote Diamantes", "Diamantes", "gems",
+                        "ONE_TIME", null, "BRL", 1,
+                        new BigDecimal("19.90"), new BigDecimal("19.90"),
+                        "autopix", null, null,
+                        List.of(), List.of("give {player} diamond 64")));
+
+        PixData pd = new PixData("PAY-DB-FAIL", "QR-DB-FAIL");
+        Order order = OrderManager.createOrderDetailed(
+                "DbFailPlayer", playerUuid, "Pacote Diamantes",
+                new BigDecimal("19.90"), new BigDecimal("19.90"), BigDecimal.ZERO,
+                null, Instant.now().plusSeconds(1800), pd, items);
+        assertTrue(OrderManager.approvePayment(pd, order, "E_DB_FAIL_TX"));
+
+        // 1. Shut down pool before delivery -> claim cannot be persisted -> commands MUST NOT execute
+        OrderManager.shutdown();
+        List<String> executedCommands = new ArrayList<>();
+        List<DeliveryCompletedEvent> completedEvents = new ArrayList<>();
+        AutoPixEventDispatcher.registerTestListener(ev -> {
+            if (ev instanceof DeliveryCompletedEvent) completedEvents.add((DeliveryCompletedEvent) ev);
+        });
+
+        int deliveredWhenDbDown = DeliveryManager.processOrderDeliveryItemsSync(
+                order, items, playerUuid, executedCommands::add);
+        assertEquals(0, deliveredWhenDbDown);
+        assertTrue(executedCommands.isEmpty(), "Recompensas jamais podem ser executadas se o claim no banco falhar.");
+        assertTrue(completedEvents.isEmpty());
+
+        // 2. Restart DB, but shut down DB during command execution so completion cannot be persisted ->
+        // DeliveryCompletedEvent MUST NOT be dispatched!
+        initSqlitePool(sqliteFile);
+        int deliveredWhenCompleteFails = DeliveryManager.processOrderDeliveryItemsSync(
+                order, items, playerUuid, cmd -> {
+                    executedCommands.add(cmd);
+                    OrderManager.shutdown();
+                });
+        assertEquals(0, deliveredWhenCompleteFails, "Entrega nao pode ser considerada concluida se a persistencia final falhar.");
+        assertEquals(1, executedCommands.size());
+        assertTrue(completedEvents.isEmpty(), "DeliveryCompletedEvent jamais pode ser disparado se a conclusao nao foi persistida.");
+
+        // Restore pool for tearDown
+        initSqlitePool(sqliteFile);
+    }
+
+    @Test
+    void testNoJdbcOperationRunsOnBukkitMainThreadAndAsyncDeliveryPipeline() throws Exception {
+        Thread currentThread = Thread.currentThread();
+        // 1. Simulate current thread as Bukkit main thread -> OrderManager.getConnection() must throw IllegalStateException
+        OrderManager.setSimulatedMainThreadForTesting(currentThread);
+        try {
+            assertThrows(IllegalStateException.class, OrderManager::getConnection,
+                    "Nenhuma operacao JDBC pode executar na main thread do Bukkit.");
+        } finally {
+            OrderManager.setSimulatedMainThreadForTesting(null);
+        }
+
+        // 2. Verify DeliveryManager.processOrderDeliveryItemsAsync runs all JDBC on asyncExec and all commands/events on mainExec
+        UUID playerUuid = UUID.randomUUID();
+        List<OrderItem> items = List.of(
+                new OrderItem("async_item", "default", "Async Item", "Item", "money",
+                        "ONE_TIME", null, "BRL", 1,
+                        new BigDecimal("10.00"), new BigDecimal("10.00"),
+                        "autopix", null, null,
+                        List.of(), List.of("eco give {player} 100")));
+        PixData pd = new PixData("PAY-ASYNC-PIPE", "QR-ASYNC");
+        Order order = OrderManager.createOrderDetailed(
+                "AsyncPlayer", playerUuid, "Async Item",
+                new BigDecimal("10.00"), new BigDecimal("10.00"), BigDecimal.ZERO,
+                null, Instant.now().plusSeconds(1800), pd, items);
+        assertTrue(OrderManager.approvePayment(pd, order, "E_ASYNC_PIPE_TX"));
+
+        ExecutorService simMainThread = Executors.newSingleThreadExecutor(r -> new Thread(r, "Sim-Bukkit-Main"));
+        ExecutorService simAsyncPool = Executors.newSingleThreadExecutor(r -> new Thread(r, "Sim-Bukkit-Async"));
+        try {
+            Thread mainThreadRef = simMainThread.submit(Thread::currentThread).get();
+            OrderManager.setSimulatedMainThreadForTesting(mainThreadRef);
+
+            AtomicBoolean commandRanOnMain = new AtomicBoolean(false);
+            CountDownLatch completedLatch = new CountDownLatch(1);
+            AutoPixEventDispatcher.registerTestListener(ev -> {
+                if (ev instanceof DeliveryCompletedEvent) {
+                    completedLatch.countDown();
+                }
+            });
+
+            DeliveryManager.processOrderDeliveryItemsAsync(
+                    order, items, playerUuid,
+                    simAsyncPool::execute,
+                    simMainThread::execute,
+                    cmd -> commandRanOnMain.set(Thread.currentThread() == mainThreadRef));
+
+            assertTrue(completedLatch.await(5, java.util.concurrent.TimeUnit.SECONDS),
+                    "Pipeline assincrono de entrega deve concluir sem executar JDBC na main thread.");
+            assertTrue(commandRanOnMain.get(), "Comandos do Bukkit devem executar na main thread.");
+            assertEquals(OrderStatus.DELIVERED, OrderManager.getOrderById(order.getId()).getStatus());
+        } finally {
+            OrderManager.setSimulatedMainThreadForTesting(null);
+            simMainThread.shutdownNow();
+            simAsyncPool.shutdownNow();
+        }
+    }
+
+    @Test
+    void testDueSubscriptionsTransitionToPastDueRenewOnceAndSuspendAfterGrace() throws Exception {
+        enableProviderHooks();
+        UUID playerUuid = UUID.randomUUID();
+        DeliveryConfig deliv = new DeliveryConfig(DeliveryType.AUTOPIX, List.of("say sub {player}"), null);
+        Offer offer = new Offer("monthly", "sub_due_vip", OfferType.SUBSCRIPTION, new BigDecimal("29.90"), "30d", true);
+        Product product = new Product("sub_due_vip", "VIP Due Test", "vips", true, new BigDecimal("29.90"), List.of(offer), deliv);
+        CatalogManager.registerProductForTesting(product);
+
+        // 1. Create and activate subscription (Cycle 1 PAID)
+        SubscriptionResult created = SubscriptionManager.createSubscription(playerUuid, "sub_due_vip", "monthly");
+        assertTrue(created.isSuccessful());
+        String subId = created.getSubscription().getId();
+        String initPayId = created.getPayment().getId();
+        providerPayments.put(initPayId, new PaymentInfo(
+                initPayId, "E_DUE_INIT_1", "approved", new BigDecimal("29.90"), "BRL", Integer.toString(created.getOrder().getId())));
+        assertTrue(OrderManager.reconcilePaymentById(null, initPayId));
+        assertEquals(SubscriptionStatus.ACTIVE, SubscriptionManager.getSubscription(subId).getStatus());
+
+        // 2. Backdate current_period_end & next_billing_at to 1 hour ago so the subscription is due
+        Instant pastDueTime = Instant.now().minus(1, ChronoUnit.HOURS);
+        try (Connection conn = OrderManager.getConnection();
+             PreparedStatement stmt = conn.prepareStatement(
+                     "UPDATE autopix_subscriptions SET current_period_end = ?, next_billing_at = ? WHERE subscription_id = ?;")) {
+            stmt.setTimestamp(1, Timestamp.from(pastDueTime));
+            stmt.setTimestamp(2, Timestamp.from(pastDueTime));
+            stmt.setString(3, subId);
+            stmt.executeUpdate();
+        }
+
+        int chargesBeforeDue = generatedPaymentCounter.get();
+
+        // 3. Run processDueSubscriptions multiple times AND call renewSubscription via AutoPixAPI:
+        // Must transition ACTIVE -> PAST_DUE and create exactly ONE renewal invoice & charge for Cycle #2!
+        SubscriptionManager.processDueSubscriptions();
+        SubscriptionManager.processDueSubscriptions();
+        SubscriptionResult playerRenewRes = AutoPixAPI.renewSubscription(subId).toCompletableFuture().get();
+        assertTrue(playerRenewRes.isSuccessful());
+        assertNotNull(playerRenewRes.getOrder());
+        assertNotNull(playerRenewRes.getPayment());
+
+        Subscription pastDueSub = SubscriptionManager.getSubscription(subId);
+        assertEquals(SubscriptionStatus.PAST_DUE, pastDueSub.getStatus(),
+                "Assinatura ativa vencida deve transicionar para PAST_DUE.");
+        List<SubscriptionInvoice> invoices = SubscriptionManager.getSubscriptionInvoices(subId);
+        assertEquals(2, invoices.size(), "Processamento de vencimento e renovacao nao podem criar faturas duplicadas.");
+        assertEquals(chargesBeforeDue + 1, generatedPaymentCounter.get(),
+                "Apenas 1 cobranca PIX deve ser criada para o ciclo de renovacao pendente.");
+
+        // 4. If Cycle #2's PIX payment fails (rejected) and the player retries renewSubscription,
+        // it reuses Cycle #2's invoice with a new PIX charge instead of creating a Cycle #3 invoice
+        String cycle2PayId = playerRenewRes.getPayment().getId();
+        providerPayments.put(cycle2PayId, new PaymentInfo(
+                cycle2PayId, null, "rejected", new BigDecimal("29.90"), "BRL", null));
+        assertTrue(OrderManager.reconcilePaymentById(null, cycle2PayId));
+        assertEquals("REJECTED", SubscriptionManager.getInvoice(playerRenewRes.getInvoice().getInvoiceId()).getStatus());
+
+        SubscriptionResult retryRenewRes = SubscriptionManager.renewSubscription(subId);
+        assertTrue(retryRenewRes.isSuccessful());
+        assertEquals(2, retryRenewRes.getInvoice().getCycleNumber());
+        assertEquals(2, SubscriptionManager.getSubscriptionInvoices(subId).size(),
+                "Retentativa de ciclo nao pago deve reutilizar o mesmo ciclo sem duplicar faturas.");
+
+        // 5. Backdate grace_until to 1 hour ago -> processDueSubscriptions transitions PAST_DUE -> SUSPENDED
+        List<SubscriptionSuspendedEvent> suspendedEvents = new ArrayList<>();
+        AutoPixEventDispatcher.registerTestListener(ev -> {
+            if (ev instanceof SubscriptionSuspendedEvent) suspendedEvents.add((SubscriptionSuspendedEvent) ev);
+        });
+        try (Connection conn = OrderManager.getConnection();
+             PreparedStatement stmt = conn.prepareStatement(
+                     "UPDATE autopix_subscriptions SET grace_until = ? WHERE subscription_id = ?;")) {
+            stmt.setTimestamp(1, Timestamp.from(Instant.now().minus(1, ChronoUnit.HOURS)));
+            stmt.setString(2, subId);
+            stmt.executeUpdate();
+        }
+        SubscriptionManager.processDueSubscriptions();
+        assertEquals(SubscriptionStatus.SUSPENDED, SubscriptionManager.getSubscription(subId).getStatus());
+        assertEquals(1, suspendedEvents.size());
+    }
+
+    @Test
+    void testFinancialCalculationsPreserveBigDecimalPrecisionAndValidateScale() throws Exception {
+        // 1. PixGenerator BigDecimal precision and scale validation
+        assertTrue(PixGenerator.isValidCurrencyAmount(new BigDecimal("19.99")));
+        assertTrue(PixGenerator.isValidCurrencyAmount(new BigDecimal("10.500"))); // trailing zero scale <= 2
+        assertFalse(PixGenerator.isValidCurrencyAmount(new BigDecimal("0.00")));
+        assertFalse(PixGenerator.isValidCurrencyAmount(new BigDecimal("-5.00")));
+        assertFalse(PixGenerator.isValidCurrencyAmount(new BigDecimal("19.995"))); // 3 decimal places
+
+        String payload = PixGenerator.generatePayload("pix@servidor.com", "Servidor", "VIP", new BigDecimal("1234.56"));
+        assertNotNull(payload);
+        assertTrue(payload.contains("54071234.56"), "Payload PIX deve preservar o valor exato do BigDecimal.");
+        assertNull(PixGenerator.generatePayload("pix@servidor.com", "Servidor", "VIP", new BigDecimal("19.999")));
+        assertNull(PixGenerator.generatePayload("pix@servidor.com", "Servidor", "VIP", BigDecimal.ZERO));
+
+        // 2. MercadoPagoAPI BigDecimal preservation and scale validation
+        enableProviderHooks();
+        PixData validMp = MercadoPagoAPI.createPixPayment(null, "PlayerFin", "VIP", new BigDecimal("99.95"), "idemp_fin_1");
+        assertNotNull(validMp);
+        assertEquals(new BigDecimal("99.95"), providerPayments.get(validMp.getPaymentId()).getPaidAmountDecimal());
+
+        assertNull(MercadoPagoAPI.createPixPayment(null, "PlayerFin", "VIP", new BigDecimal("99.955"), "idemp_fin_bad1"));
+        assertNull(MercadoPagoAPI.createPixPayment(null, "PlayerFin", "VIP", BigDecimal.ZERO, "idemp_fin_bad2"));
+        assertThrows(IllegalArgumentException.class, () ->
+                MercadoPagoAPI.buildCreatePaymentJson("PlayerFin", "VIP", new BigDecimal("10.123"), "PlayerFin", null));
+
+        // 3. OrderManager rejects invalid scale or non-positive amounts
+        assertNull(OrderManager.createOrderDetailed(
+                "PlayerFin", UUID.randomUUID(), "VIP", new BigDecimal("10.999"),
+                new BigDecimal("10.999"), BigDecimal.ZERO, null, null, null, null));
+        assertNull(OrderManager.createOrderDetailed(
+                "PlayerFin", UUID.randomUUID(), "VIP", BigDecimal.ZERO,
+                BigDecimal.ZERO, BigDecimal.ZERO, null, null, null, null));
+    }
+
+    @Test
+    void testAlreadyAppliedMigrationsAreNotExecutedAgainAndFailedStepRollsBack() throws Exception {
+        try (Connection conn = OrderManager.getConnection()) {
+            Set<Integer> initialApplied = DatabaseMigrationRunner.getAppliedVersions(conn);
+            assertTrue(initialApplied.contains(1));
+            assertTrue(initialApplied.contains(DatabaseMigrationRunner.LATEST_SCHEMA_VERSION));
+
+            // 1. Running an already-applied version (e.g. version 1) MUST NOT execute the MigrationStep
+            AtomicInteger stepExecutionCount = new AtomicInteger(0);
+            boolean executedAlreadyApplied = DatabaseMigrationRunner.runVersionedMigration(
+                    conn, 1, "v1_should_be_skipped", c -> stepExecutionCount.incrementAndGet());
+            assertFalse(executedAlreadyApplied, "Migracao ja aplicada nao pode ser executada novamente.");
+            assertEquals(0, stepExecutionCount.get(), "O corpo da migracao ja aplicada jamais deve ser invocado.");
+
+            // 2. Running a new migration version (version 99) executes once, and a second call skips it
+            boolean executedV99First = DatabaseMigrationRunner.runVersionedMigration(
+                    conn, 99, "v99_custom_test_migration", c -> stepExecutionCount.incrementAndGet());
+            assertTrue(executedV99First);
+            assertEquals(1, stepExecutionCount.get());
+            assertTrue(DatabaseMigrationRunner.getAppliedVersions(conn).contains(99));
+
+            boolean executedV99Second = DatabaseMigrationRunner.runVersionedMigration(
+                    conn, 99, "v99_custom_test_migration", c -> stepExecutionCount.incrementAndGet());
+            assertFalse(executedV99Second);
+            assertEquals(1, stepExecutionCount.get(), "Segunda chamada para V99 nao pode reexecutar o step.");
+
+            // 3. A failing migration step (version 100) rolls back its changes and is NOT marked as applied
+            assertThrows(SQLException.class, () ->
+                    DatabaseMigrationRunner.runVersionedMigration(conn, 100, "v100_failing_migration", c -> {
+                        try (Statement stmt = c.createStatement()) {
+                            stmt.executeUpdate("CREATE TABLE autopix_temp_rollback_test (id INTEGER PRIMARY KEY);");
+                            throw new SQLException("Falha simulada durante migracao V100");
+                        }
+                    }));
+            assertFalse(DatabaseMigrationRunner.getAppliedVersions(conn).contains(100),
+                    "Migracao falha jamais pode ser marcada como aplicada.");
         }
     }
 }

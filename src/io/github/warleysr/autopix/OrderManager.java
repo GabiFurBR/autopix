@@ -1179,7 +1179,7 @@ public class OrderManager {
                     || (order.getPlayer() != null && trimmedRef.equalsIgnoreCase(order.getPlayer()))
                     || (order.getIdempotencyKey() != null && trimmedRef.equalsIgnoreCase(order.getIdempotencyKey()));
             if (!validRef) {
-                io.github.warleysr.autopix.subscription.SubscriptionInvoice linkedInv =
+                io.github.warleysr.autopix.api.SubscriptionInvoice linkedInv =
                         SubscriptionManager.getInvoiceByOrderId(order.getId());
                 if (linkedInv != null) {
                     validRef = trimmedRef.equalsIgnoreCase(linkedInv.getSubscriptionId())

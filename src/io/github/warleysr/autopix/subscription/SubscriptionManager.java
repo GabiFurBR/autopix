@@ -22,6 +22,7 @@ import org.bukkit.OfflinePlayer;
 
 import io.github.warleysr.autopix.AutoPix;
 import io.github.warleysr.autopix.OrderManager;
+import io.github.warleysr.autopix.api.OrderStatus;
 import io.github.warleysr.autopix.api.Payment;
 import io.github.warleysr.autopix.api.PaymentStatus;
 import io.github.warleysr.autopix.api.Subscription;

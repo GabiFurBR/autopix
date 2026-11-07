@@ -623,6 +623,8 @@ public final class DeliveryManager {
                 }
             }
 
+            updateOrderStatusIfAllItemsDelivered(connection, orderId);
+
             try (PreparedStatement sel = connection.prepareStatement(selectSql)) {
                 sel.setInt(1, orderId);
                 sel.setInt(2, itemIndex);
@@ -774,10 +776,11 @@ public final class DeliveryManager {
 
         AutoPix plugin = AutoPix.getInstance();
         defaultMainThreadExecutor(plugin).execute(() -> {
-            AutoPixEventDispatcher.dispatch(new DeliveryFailedEvent(
-                    finalDelivId, orderId, itemIndex, finalUuid, finalHandler, effectiveReason));
             if (fireReview) {
                 AutoPixEventDispatcher.dispatch(new DeliveryNeedsReviewEvent(
+                        finalDelivId, orderId, itemIndex, finalUuid, finalHandler, effectiveReason));
+            } else {
+                AutoPixEventDispatcher.dispatch(new DeliveryFailedEvent(
                         finalDelivId, orderId, itemIndex, finalUuid, finalHandler, effectiveReason));
             }
         });
@@ -1223,13 +1226,34 @@ public final class DeliveryManager {
             statement.setInt(4, orderId);
             statement.setInt(5, itemIndex);
             statement.setString(6, claimToken);
-            return statement.executeUpdate() == 1;
+            if (statement.executeUpdate() != 1) {
+                return false;
+            }
+            updateOrderStatusIfAllItemsDelivered(connection, orderId);
+            return true;
         } catch (SQLException ex) {
             AutoPix plugin = AutoPix.getInstance();
             if (plugin != null) {
                 plugin.getLogger().warning("Erro ao completar entrega: " + ex.getMessage());
             }
             return false;
+        }
+    }
+
+    private static void updateOrderStatusIfAllItemsDelivered(Connection connection, int orderId) throws SQLException {
+        String checkPendingSql = "SELECT COUNT(*) AS remaining FROM autopix_deliveries "
+                + "WHERE order_id = ? AND LOWER(status) NOT IN ('delivered', 'completed');";
+        try (PreparedStatement check = connection.prepareStatement(checkPendingSql)) {
+            check.setInt(1, orderId);
+            try (ResultSet rs = check.executeQuery()) {
+                if (rs.next() && rs.getInt("remaining") == 0) {
+                    try (PreparedStatement updOrder = connection.prepareStatement(
+                            "UPDATE autopix_orders SET status = 'DELIVERED' WHERE id = ? AND status = 'PAID';")) {
+                        updOrder.setInt(1, orderId);
+                        updOrder.executeUpdate();
+                    }
+                }
+            }
         }
     }
 

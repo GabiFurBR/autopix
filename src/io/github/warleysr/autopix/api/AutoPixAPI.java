@@ -47,7 +47,6 @@ import io.github.warleysr.autopix.mercadopago.MercadoPagoAPI;
 import io.github.warleysr.autopix.mercadopago.WebhookValidator;
 import io.github.warleysr.autopix.qrcode.ImageCreator;
 import io.github.warleysr.autopix.qrcode.PixGenerator;
-import io.github.warleysr.autopix.subscription.SubscriptionInvoice;
 import io.github.warleysr.autopix.subscription.SubscriptionManager;
 
 /**
