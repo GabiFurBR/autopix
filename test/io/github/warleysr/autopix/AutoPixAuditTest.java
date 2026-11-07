@@ -1246,6 +1246,7 @@ class AutoPixAuditTest {
         assertTrue(deliveryContent.contains("addgem({_p}, {_amount})"));
         assertTrue(deliveryContent.contains("addstars({_p}, {_amount})"));
         assertTrue(deliveryContent.contains("addpumpcoins({_p}, {_amount})"));
+        assertTrue(deliveryContent.contains("if {_handler} is \"custom_donation_reward\":"));
         assertTrue(deliveryContent.contains("::state} to \"APPLIED\""));
         assertTrue(deliveryContent.contains("AutoPixAPI.confirmCustomDelivery("));
 
