@@ -24,6 +24,7 @@ public final class DatabaseMigrationRunner {
 
     public static final int LATEST_SCHEMA_VERSION = 6;
     private static final Logger FALLBACK_LOGGER = Logger.getLogger("AutoPix-Migrations");
+    private static final Object MIGRATION_LOCK = new Object();
 
     private DatabaseMigrationRunner() {
     }
@@ -32,32 +33,50 @@ public final class DatabaseMigrationRunner {
         if (connection == null) {
             throw new SQLException("Conexao nula fornecida para o executor de migracoes.");
         }
-        String dialect = dbType != null ? dbType.trim().toLowerCase(Locale.ROOT) : "sqlite";
-        ensureMigrationsTable(connection);
-        Set<Integer> appliedVersions = getAppliedVersions(connection);
+        synchronized (MIGRATION_LOCK) {
+            String dialect = dbType != null ? dbType.trim().toLowerCase(Locale.ROOT) : "sqlite";
+            ensureMigrationsTable(connection);
+            Set<Integer> appliedVersions = getAppliedVersions(connection);
 
-        runMigration(connection, appliedVersions, 1, "v1_base_legacy_tables",
-                conn -> migrateV1BaseLegacyTables(conn, dialect, idDefinition));
+            runMigration(connection, appliedVersions, 1, "v1_base_legacy_tables",
+                    conn -> migrateV1BaseLegacyTables(conn, dialect, idDefinition));
 
-        runMigration(connection, appliedVersions, 2, "v2_orders_extended_columns",
-                conn -> migrateV2OrdersExtendedColumns(conn, dialect));
+            runMigration(connection, appliedVersions, 2, "v2_orders_extended_columns",
+                    conn -> migrateV2OrdersExtendedColumns(conn, dialect));
 
-        runMigration(connection, appliedVersions, 3, "v3_order_items_and_carts_snapshots",
-                conn -> migrateV3OrderItemsAndCarts(conn, dialect));
+            runMigration(connection, appliedVersions, 3, "v3_order_items_and_carts_snapshots",
+                    conn -> migrateV3OrderItemsAndCarts(conn, dialect));
 
-        runMigration(connection, appliedVersions, 4, "v4_multi_item_deliveries_outbox",
-                conn -> migrateV4DeliveriesOutbox(conn, dialect));
+            runMigration(connection, appliedVersions, 4, "v4_multi_item_deliveries_outbox",
+                    conn -> migrateV4DeliveriesOutbox(conn, dialect));
 
-        runMigration(connection, appliedVersions, 5, "v5_payments_subscriptions_webhooks",
-                conn -> migrateV5PaymentsSubscriptionsWebhooks(conn, dialect));
+            runMigration(connection, appliedVersions, 5, "v5_payments_subscriptions_webhooks",
+                    conn -> migrateV5PaymentsSubscriptionsWebhooks(conn, dialect));
 
-        runMigration(connection, appliedVersions, 6, "v6_schema_indexes",
-                conn -> migrateV6Indexes(conn, dialect));
+            runMigration(connection, appliedVersions, 6, "v6_schema_indexes",
+                    conn -> migrateV6Indexes(conn, dialect));
+        }
     }
 
     @FunctionalInterface
-    private interface MigrationStep {
+    public interface MigrationStep {
         void execute(Connection connection) throws SQLException;
+    }
+
+    public static boolean runVersionedMigration(Connection connection, int version,
+                                                String description, MigrationStep step) throws SQLException {
+        if (connection == null) {
+            throw new SQLException("Conexao nula fornecida para o executor de migracoes.");
+        }
+        synchronized (MIGRATION_LOCK) {
+            ensureMigrationsTable(connection);
+            Set<Integer> appliedVersions = getAppliedVersions(connection);
+            if (appliedVersions.contains(version)) {
+                return false;
+            }
+            runMigration(connection, appliedVersions, version, description, step);
+            return true;
+        }
     }
 
     private static void ensureMigrationsTable(Connection connection) throws SQLException {
@@ -83,23 +102,25 @@ public final class DatabaseMigrationRunner {
 
     private static void runMigration(Connection connection, Set<Integer> appliedVersions,
                                      int version, String description, MigrationStep step) throws SQLException {
+        if (appliedVersions.contains(version)) {
+            return;
+        }
+
         boolean previousAutoCommit = connection.getAutoCommit();
         try {
             connection.setAutoCommit(false);
             step.execute(connection);
 
-            if (!appliedVersions.contains(version)) {
-                String sql = "INSERT INTO autopix_schema_migrations (version, description, applied_at) VALUES (?, ?, ?);";
-                try (PreparedStatement stmt = connection.prepareStatement(sql)) {
-                    stmt.setInt(1, version);
-                    stmt.setString(2, description);
-                    stmt.setTimestamp(3, Timestamp.from(Instant.now()));
-                    stmt.executeUpdate();
-                }
-                appliedVersions.add(version);
-                logInfo("Migracao de banco V" + version + " (" + description + ") aplicada com sucesso.");
+            String sql = "INSERT INTO autopix_schema_migrations (version, description, applied_at) VALUES (?, ?, ?);";
+            try (PreparedStatement stmt = connection.prepareStatement(sql)) {
+                stmt.setInt(1, version);
+                stmt.setString(2, description);
+                stmt.setTimestamp(3, Timestamp.from(Instant.now()));
+                stmt.executeUpdate();
             }
             connection.commit();
+            appliedVersions.add(version);
+            logInfo("Migracao de banco V" + version + " (" + description + ") aplicada com sucesso.");
         } catch (SQLException ex) {
             try {
                 connection.rollback();
