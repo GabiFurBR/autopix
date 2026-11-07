@@ -399,9 +399,7 @@ public final class DatabaseMigrationRunner {
                 + "idempotency_key, claim_token, claimed_at, execution_stage, payload, attempts, updated_at, last_error) "
                 + "VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, ?, ?, ?, ?);";
         for (LegacyDeliveryRow row : rows) {
-            if (deliveryRowExists(conn,
-                    "SELECT delivery_id FROM autopix_deliveries WHERE order_id = ? AND item_index = ?;",
-                    row.orderId, row.itemIndex)) {
+            if (migrationDeliveryRowExists(conn, row.orderId, row.itemIndex)) {
                 continue;
             }
             String deliveryId = "deliv_" + row.orderId + "_" + row.itemIndex;
@@ -419,6 +417,17 @@ public final class DatabaseMigrationRunner {
                 ins.setTimestamp(11, row.updatedAt);
                 ins.setString(12, row.lastError);
                 ins.executeUpdate();
+            }
+        }
+    }
+
+    private static boolean migrationDeliveryRowExists(Connection conn, int orderId, int itemIndex) throws SQLException {
+        try (PreparedStatement check = conn.prepareStatement(
+                "SELECT 1 FROM autopix_deliveries WHERE order_id = ? AND item_index = ?;")) {
+            check.setInt(1, orderId);
+            check.setInt(2, itemIndex);
+            try (ResultSet rs = check.executeQuery()) {
+                return rs.next();
             }
         }
     }
