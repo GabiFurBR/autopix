@@ -1,0 +1,49 @@
+options:
+    prefix: "&b&lAUTOPIX &8» &7"
+    prefix_sucesso: "&a&lSUCESSO &8» &f"
+    prefix_erro: "&c&lERRO &8» &f"
+    prefix_aviso: "&e&lAVISO &8» &f"
+    prefix_carrinho: "&6&lCARRINHO &8» &f"
+    prefix_pix: "&b&lPIX &8» &f"
+    prefix_vip: "&6&lVIP &8» &f"
+    cor_principal: "&b"
+    cor_secundaria: "&3"
+    cor_destaque: "&e"
+    cor_sucesso: "&a"
+    cor_erro: "&c"
+    moeda: "R$ "
+
+function lojaMsg(p: player, msg: text):
+    send "%{@prefix}%%{_msg}%" to {_p}
+
+function lojaSucesso(p: player, msg: text):
+    send "%{@prefix_sucesso}%%{_msg}%" to {_p}
+
+function lojaErro(p: player, msg: text):
+    send "%{@prefix_erro}%%{_msg}%" to {_p}
+
+function lojaAviso(p: player, msg: text):
+    send "%{@prefix_aviso}%%{_msg}%" to {_p}
+
+function formatarPreco(valor: number) :: text:
+    set {_v} to "%{_valor}%"
+    return "%{@moeda}%%{_v}%"
+
+function formatarStatus(status: text) :: text:
+    if {_status} is "PENDING" or "pending" or "PAYMENT_PENDING":
+        return "&ePendente"
+    if {_status} is "PAID" or "approved" or "APPROVED":
+        return "&aAprovado"
+    if {_status} is "CANCELLED" or "cancelled":
+        return "&cCancelado"
+    if {_status} is "REJECTED" or "rejected" or "FAILED" or "UNPAID":
+        return "&cRejeitado"
+    if {_status} is "PAST_DUE":
+        return "&6Pagamento Pendente"
+    if {_status} is "SUSPENDED" or "EXPIRED":
+        return "&cSuspenso/Expirado"
+    if {_status} is "ACTIVE" or "active":
+        return "&aAtivo"
+    if {_status} is "NEEDS_REVIEW" or "needs_review":
+        return "&6Em Revisão"
+    return "&7%{_status}%"

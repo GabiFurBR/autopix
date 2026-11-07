@@ -1,0 +1,94 @@
+import:
+    io.github.warleysr.autopix.api.AutoPixAPI
+    io.github.warleysr.autopix.api.CheckoutRequest
+    io.github.warleysr.autopix.api.OrderCreationResult
+    io.github.warleysr.autopix.cart.CartManager
+    io.github.warleysr.autopix.catalog.CatalogManager
+    org.bukkit.entity.Player
+
+function abrirMenuCheckout(p: player):
+    if {_p} is not online:
+        stop
+    set {_uuid} to {_p}.getUniqueId()
+    set {_cart} to CartManager.getCart({_uuid})
+    set {_itens} to {_cart}.getItems()
+    set {_totalItens} to {_cart}.getItemCount()
+    if {_totalItens} is 0:
+        lojaErro({_p}, "Seu carrinho está vazio.")
+        abrirMenuPrincipal({_p})
+        stop
+    create a gui with virtual chest inventory with 5 rows named "&8Confirmar Pedido &0» PIX":
+        set {_borda::*} to 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 17, 18, 26, 27, 35, 36, 37, 38, 39, 41, 42, 43, 44
+        loop {_borda::*}:
+            format gui slot loop-value with black stained glass pane named " "
+        format gui slot 20 with book named "&6&lResumo da Compra" with lore "", "&7Total de itens: &f%{_totalItens}%", "&7Subtotal: &fR$ %{_cart}.getSubtotal()%", "&7Desconto: &cR$ %{_cart}.getDiscount()%", "&7Total a Pagar: &a&lR$ %{_cart}.getTotal()%"
+        if {preferencia_mapa::%{_p}%} is not set:
+            set {preferencia_mapa::%{_p}%} to true
+        set {_mapaIcon} to map
+        set {_mapaStatus} to "&aAtivado"
+        if {preferencia_mapa::%{_p}%} is false:
+            set {_mapaIcon} to empty map
+            set {_mapaStatus} to "&cDesativado"
+        format gui slot 22 with {_mapaIcon} named "&e&lGerar Mapa com QR Code" with lore "", "&7Status: %{_mapaStatus}%", "&7Receber mapa com imagem QR no inventário.", "", "&e» Clique para alternar":
+            if {preferencia_mapa::%{_p}%} is true:
+                set {preferencia_mapa::%{_p}%} to false
+            else:
+                set {preferencia_mapa::%{_p}%} to true
+            abrirMenuCheckout({_p})
+        format gui slot 24 with red wool named "&c&lCancelar e Voltar ao Carrinho":
+            abrirMenuCarrinho({_p})
+        format gui slot 40 with emerald block named "&a&lConfirmar e Gerar Pagamento PIX" with lore "", "&7Clique para gerar o código &bPIX Copia e Cola", "&7e o QR Code instantâneo com aprovação automática!", "", "&a» Clique para gerar cobrança":
+            close {_p}'s inventory
+            lojaAviso({_p}, "Gerando cobrança PIX com Mercado Pago, aguarde um instante...")
+            set {_giveMap} to {preferencia_mapa::%{_p}%}
+            set {_req} to new CheckoutRequest({_uuid}, null, {_cart}.getCoupon(), {_giveMap}, null, null, null)
+            set {_future} to AutoPixAPI.createOrder({_req})
+            {_future}.thenAccept({_res} -> handleOrderResult({_p}, {_res}))
+    open the last gui to {_p}
+
+function iniciarDoacaoPersonalizada(p: player):
+    if {_p} is not online:
+        stop
+    close {_p}'s inventory
+    set {_cfg} to CatalogManager.getCustomDonationConfig()
+    if {_cfg} is not set:
+        lojaErro({_p}, "Doações personalizadas não estão configuradas.")
+        stop
+    if {_cfg}.isEnabled() is false:
+        lojaErro({_p}, "Doações personalizadas estão desativadas.")
+        stop
+    set {_min} to {_cfg}.getMinimum()
+    set {_max} to {_cfg}.getMaximum()
+    set {aguardando_doacao_livre::%{_p}%} to true
+    lojaAviso({_p}, "Digite no chat o valor da sua doação entre &aR$ %{_min}% &fe &aR$ %{_max}% &7(ou digite &ccancelar&7):")
+
+on chat:
+    if {aguardando_doacao_livre::%player%} is true:
+        cancel event
+        delete {aguardando_doacao_livre::%player%}
+        set {_msg} to message
+        if {_msg} is "cancelar":
+            lojaAviso(player, "Doação personalizada cancelada.")
+            stop
+        set {_cfg} to CatalogManager.getCustomDonationConfig()
+        if {_cfg} is not set:
+            lojaErro(player, "Doações personalizadas indisponíveis.")
+            stop
+        set {_uuid} to player.getUniqueId()
+        try:
+            set {_valorValidado} to {_cfg}.validateAndNormalize({_msg})
+            lojaAviso(player, "Gerando cobrança PIX para doação de &aR$ %{_valorValidado}%&7...")
+            set {_req} to CheckoutRequest.customDonation({_uuid}, {_valorValidado})
+            set {_future} to AutoPixAPI.createOrder({_req})
+            {_future}.thenAccept({_res} -> handleOrderResult(player, {_res}))
+        catch {_err}:
+            lojaErro(player, "Valor inválido para doação. Informe um número entre R$ %{_cfg}.getMinimum()% e R$ %{_cfg}.getMaximum()%.")
+
+function handleOrderResult(p: player, res: object):
+    if {_p} is online:
+        if {_res}.isSuccessful() is true:
+            set {_order} to {_res}.getOrder()
+            set {_payment} to {_res}.getPayment()
+            exibirTelaPagamento({_p}, {_order}, {_payment})
+        else:
+            lojaErro({_p}, "Falha ao gerar pedido: %{_res}.getMessage()%")

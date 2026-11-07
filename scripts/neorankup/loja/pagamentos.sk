@@ -1,0 +1,43 @@
+import:
+    io.github.warleysr.autopix.api.AutoPixAPI
+    io.github.warleysr.autopix.domain.Order
+    io.github.warleysr.autopix.api.Payment
+    org.bukkit.entity.Player
+
+function exibirTelaPagamento(p: player, order: object, payment: object):
+    if {_p} is not online:
+        stop
+    set {_id} to {_order}.getId()
+    set {_produto} to {_order}.getProduct()
+    set {_total} to {_order}.getPrice()
+    set {_payload} to {_payment}.getCopyPasteCode()
+    send "" to {_p}
+    send "&b&lAUTOPIX &8» &aCobrança PIX gerada com sucesso!" to {_p}
+    send "&7Pedido: &f#%{_id}% &8| &7Valor: &aR$ %{_total}%" to {_p}
+    send "&7Produto(s): &f%{_produto}%" to {_p}
+    send "" to {_p}
+    send "&e&lCÓDIGO PIX COPIA E COLA:" to {_p}
+    send "&f%{_payload}%" to {_p}
+    send "" to {_p}
+    send "&7Pague através do aplicativo do seu banco." to {_p}
+    send "&7A aprovação e entrega ocorrem automaticamente após a confirmação!" to {_p}
+    send "" to {_p}
+    create a gui with virtual chest inventory with 4 rows named "&8Pagamento &0» Pedido #%{_id}%":
+        set {_borda::*} to 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 17, 18, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35
+        loop {_borda::*}:
+            format gui slot loop-value with black stained glass pane named " "
+        format gui slot 11 with paper named "&e&lInformações do Pedido #%{_id}%" with lore "", "&7Produto: &f%{_produto}%", "&7Total: &aR$ %{_total}%", "&7Status: &eAguardando Pagamento...", "", "&7Abra seu banco e pague com PIX."
+        format gui slot 13 with sunflower named "&6&lCopiar Código PIX" with lore "", "&7Clique para reenviar o código", "&7copia-e-cola no seu chat!", "", "&e» Clique para copiar":
+            send "" to {_p}
+            send "&b[AutoPix] &fCódigo Copia e Cola do Pedido #%{_id}%:" to {_p}
+            send "&b%{_payload}%" to {_p}
+            send "" to {_p}
+        format gui slot 15 with red wool named "&c&lCancelar Pedido" with lore "", "&7Deseja desistir desta compra?", "", "&c» Clique para cancelar":
+            close {_p}'s inventory
+            set {_cancelFuture} to AutoPixAPI.cancelOrder("%{_id}%", "Cancelado pelo jogador.")
+            {_cancelFuture}.thenAccept({_ok} -> handleCancelOrderUi({_p}, {_id}, {_ok}))
+    open the last gui to {_p}
+
+function handleCancelOrderUi(p: player, orderId: number, ok: object):
+    if {_p} is online:
+        lojaAviso({_p}, "Pedido #%{_orderId}% cancelado.")

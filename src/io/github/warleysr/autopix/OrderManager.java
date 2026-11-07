@@ -1,8 +1,6 @@
 package io.github.warleysr.autopix;
 
-import java.awt.image.BufferedImage;
 import java.io.File;
-import java.io.InputStream;
 import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.sql.Connection;
@@ -23,33 +21,32 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 
-import javax.imageio.ImageIO;
-
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import org.bukkit.Bukkit;
 import org.bukkit.configuration.file.FileConfiguration;
 import org.bukkit.entity.Player;
-import org.bukkit.inventory.ItemStack;
 import org.bukkit.scheduler.BukkitRunnable;
 import org.json.simple.JSONArray;
 import org.json.simple.parser.JSONParser;
 
-import io.github.warleysr.autopix.discord.DiscordNotifier;
+import io.github.warleysr.autopix.api.OrderStatus;
+import io.github.warleysr.autopix.api.Payment;
+import io.github.warleysr.autopix.api.PaymentStatus;
+import io.github.warleysr.autopix.delivery.DeliveryManager;
 import io.github.warleysr.autopix.domain.DonorInfo;
 import io.github.warleysr.autopix.domain.Order;
-import io.github.warleysr.autopix.domain.OrderProduct;
 import io.github.warleysr.autopix.domain.OrderItem;
+import io.github.warleysr.autopix.domain.OrderProduct;
 import io.github.warleysr.autopix.domain.PaymentInfo;
 import io.github.warleysr.autopix.domain.PixData;
 import io.github.warleysr.autopix.events.AutoPixEventDispatcher;
-import io.github.warleysr.autopix.events.PaymentApprovedEvent;
 import io.github.warleysr.autopix.events.PaymentCancelledEvent;
 import io.github.warleysr.autopix.events.PaymentRejectedEvent;
 import io.github.warleysr.autopix.expansion.AutoPixExpansion;
 import io.github.warleysr.autopix.inventory.InventoryManager;
 import io.github.warleysr.autopix.mercadopago.MercadoPagoAPI;
-import io.github.warleysr.autopix.qrcode.ImageCreator;
+import io.github.warleysr.autopix.subscription.SubscriptionManager;
 
 public class OrderManager {
 
@@ -62,11 +59,32 @@ public class OrderManager {
     private static volatile HikariDataSource dataSource;
     private static volatile String activeDbType = "sqlite";
 
+    private static final AtomicBoolean DATABASE_READY = new AtomicBoolean(false);
+    private static final AtomicBoolean SHUTTING_DOWN = new AtomicBoolean(false);
     private static final AtomicBoolean VALIDATION_RUNNING = new AtomicBoolean(false);
     private static final Set<String> CREATING_ORDER_PLAYERS = ConcurrentHashMap.newKeySet();
     private static final Map<String, UUID> ONLINE_PLAYERS = new ConcurrentHashMap<>();
 
+    public static boolean isDatabaseReady() {
+        HikariDataSource source = dataSource;
+        return DATABASE_READY.get() && !SHUTTING_DOWN.get() && source != null && !source.isClosed();
+    }
+
+    public static void setDatabaseReady(boolean ready) {
+        DATABASE_READY.set(ready);
+    }
+
+    public static boolean isShuttingDown() {
+        return SHUTTING_DOWN.get();
+    }
+
+    public static void setShuttingDown(boolean shuttingDown) {
+        SHUTTING_DOWN.set(shuttingDown);
+    }
+
     protected static synchronized boolean startOrderManager(AutoPix ap) throws SQLException {
+        DATABASE_READY.set(false);
+        SHUTTING_DOWN.set(false);
         FileConfiguration cfg = ap.getConfig();
         String type = cfg.getString("database.type", "mysql").trim().toLowerCase(Locale.ROOT);
 
@@ -155,7 +173,7 @@ public class OrderManager {
         for (int attempt = 1; attempt <= maxAttempts; attempt++) {
             try {
                 initializePool(hikari, normalizedType);
-                ap.getLogger().info("Banco de dados conectado (" + normalizedType + ") e tabelas verificadas.");
+                ap.getLogger().info("Banco de dados conectado (" + normalizedType + ") e migracoes verificadas.");
                 return true;
             } catch (SQLException ex) {
                 lastException = ex;
@@ -179,11 +197,13 @@ public class OrderManager {
         HikariDataSource candidate = null;
         try {
             candidate = new HikariDataSource(hikari);
-            createTables(candidate, idDefinition, normalizedType);
+            runMigrations(candidate, idDefinition, normalizedType);
 
             HikariDataSource previous = dataSource;
             dataSource = candidate;
             activeDbType = normalizedType;
+            DATABASE_READY.set(true);
+            SHUTTING_DOWN.set(false);
             candidate = null;
             if (previous != null) previous.close();
         } catch (SQLException exception) {
@@ -205,48 +225,9 @@ public class OrderManager {
         return "INTEGER PRIMARY KEY AUTOINCREMENT";
     }
 
-    private static void createTables(HikariDataSource source, String idDefinition, String dbType) throws SQLException {
-        try (Connection connection = source.getConnection();
-             Statement statement = connection.createStatement()) {
-            statement.executeUpdate("CREATE TABLE IF NOT EXISTS autopix_orders "
-                    + "(id " + idDefinition + ", player VARCHAR(36) NOT NULL, "
-                    + "product VARCHAR(64) NOT NULL, price DECIMAL(10, 2) NOT NULL, "
-                    + "created TIMESTAMP NOT NULL, pix VARCHAR(64) UNIQUE NULL);");
-            statement.executeUpdate("CREATE TABLE IF NOT EXISTS autopix_pix_data "
-                    + "(payment_id VARCHAR(128) PRIMARY KEY, order_id INTEGER NOT NULL UNIQUE, "
-                    + "status VARCHAR(32), qr_code TEXT NOT NULL);");
-            statement.executeUpdate("CREATE TABLE IF NOT EXISTS autopix_deliveries "
-                    + "(order_id INTEGER PRIMARY KEY, status VARCHAR(32) NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, "
-                    + "updated_at TIMESTAMP NOT NULL, last_error TEXT NULL);");
-            statement.executeUpdate("CREATE TABLE IF NOT EXISTS autopix_order_items "
-                    + "(order_id INTEGER NOT NULL, item_index INTEGER NOT NULL, product VARCHAR(128) NOT NULL, "
-                    + "quantity INTEGER NOT NULL, unit_price DECIMAL(10, 2) NOT NULL, "
-                    + "pre_commands TEXT NOT NULL, commands TEXT NOT NULL, PRIMARY KEY (order_id, item_index));");
-            ensureSchemaUpgraded(statement, dbType);
-        }
-    }
-
-    private static void ensureSchemaUpgraded(Statement statement, String dbType) {
-        if ("postgresql".equalsIgnoreCase(dbType)) {
-            executeSafeAlter(statement, "ALTER TABLE autopix_orders ALTER COLUMN player TYPE VARCHAR(36);");
-            executeSafeAlter(statement, "ALTER TABLE autopix_orders ALTER COLUMN product TYPE VARCHAR(64);");
-            executeSafeAlter(statement, "ALTER TABLE autopix_orders ALTER COLUMN pix TYPE VARCHAR(64);");
-            executeSafeAlter(statement, "ALTER TABLE autopix_pix_data ALTER COLUMN status TYPE VARCHAR(32);");
-            executeSafeAlter(statement, "ALTER TABLE autopix_pix_data ALTER COLUMN qr_code TYPE TEXT;");
-            executeSafeAlter(statement, "ALTER TABLE autopix_pix_data DROP CONSTRAINT IF EXISTS autopix_pix_data_qr_code_key;");
-        } else if ("mysql".equalsIgnoreCase(dbType)) {
-            executeSafeAlter(statement, "ALTER TABLE autopix_orders MODIFY COLUMN player VARCHAR(36) NOT NULL;");
-            executeSafeAlter(statement, "ALTER TABLE autopix_orders MODIFY COLUMN product VARCHAR(64) NOT NULL;");
-            executeSafeAlter(statement, "ALTER TABLE autopix_orders MODIFY COLUMN pix VARCHAR(64) NULL;");
-            executeSafeAlter(statement, "ALTER TABLE autopix_pix_data MODIFY COLUMN status VARCHAR(32);");
-            executeSafeAlter(statement, "ALTER TABLE autopix_pix_data MODIFY COLUMN qr_code TEXT NOT NULL;");
-        }
-    }
-
-    private static void executeSafeAlter(Statement statement, String sql) {
-        try {
-            statement.executeUpdate(sql);
-        } catch (SQLException ignored) {
+    private static void runMigrations(HikariDataSource source, String idDefinition, String dbType) throws SQLException {
+        try (Connection connection = source.getConnection()) {
+            DatabaseMigrationRunner.migrate(connection, dbType, idDefinition);
         }
     }
 
@@ -268,6 +249,11 @@ public class OrderManager {
 
     public static long toCents(double value) {
         return BigDecimal.valueOf(value).setScale(2, RoundingMode.HALF_UP).movePointRight(2).longValueExact();
+    }
+
+    public static long toCents(BigDecimal value) {
+        if (value == null) return 0L;
+        return value.setScale(2, RoundingMode.HALF_UP).movePointRight(2).longValueExact();
     }
 
     public static boolean tryAcquireCreateLock(String playerName) {
@@ -310,7 +296,7 @@ public class OrderManager {
         return ONLINE_PLAYERS.get(playerName.toLowerCase(Locale.ROOT));
     }
 
-    private static Connection getConnection() throws SQLException {
+    public static Connection getConnection() throws SQLException {
         HikariDataSource source = dataSource;
         if (source == null || source.isClosed()) {
             throw new SQLException("O pool de conexoes do AutoPix nao esta inicializado.");
@@ -319,6 +305,8 @@ public class OrderManager {
     }
 
     public static synchronized void shutdown() {
+        DATABASE_READY.set(false);
+        SHUTTING_DOWN.set(true);
         HikariDataSource source = dataSource;
         dataSource = null;
         CREATING_ORDER_PLAYERS.clear();
@@ -339,30 +327,58 @@ public class OrderManager {
         return createOrderWithItems(playerName, product, price, pixData, null);
     }
 
-    /**
-     * Creates an order, its optional Mercado Pago record and all product snapshots
-     * in one database transaction.
-     */
-    public static Order createOrderWithItems(String playerName, String product, float price,
-                                             PixData pixData, List<OrderItem> items) {
+    public static Order createOrderDetailed(String playerName, UUID playerUuid, String product,
+                                            BigDecimal price, BigDecimal subtotal, BigDecimal discount,
+                                            String couponCode, Instant expiresAt, PixData pixData, List<OrderItem> items) {
+        return createOrderDetailed(playerName, playerUuid, product, price, subtotal, discount, couponCode, expiresAt, pixData, items, null);
+    }
+
+    public static Order createOrderDetailed(String playerName, UUID playerUuid, String product,
+                                            BigDecimal price, BigDecimal subtotal, BigDecimal discount,
+                                            String couponCode, Instant expiresAt, PixData pixData, List<OrderItem> items,
+                                            String idempotencyKey) {
         if (playerName == null || product == null || product.trim().isEmpty()) return null;
-        float roundedPrice = roundPrice(price);
-        if (roundedPrice < 0.01f) return null;
+        BigDecimal finalPrice = price != null ? price.setScale(2, RoundingMode.HALF_UP) : BigDecimal.ZERO;
+        if (finalPrice.compareTo(new BigDecimal("0.01")) < 0) return null;
+
+        String normalizedIdempKey = (idempotencyKey != null && !idempotencyKey.trim().isEmpty())
+                ? idempotencyKey.trim()
+                : null;
+        if (normalizedIdempKey != null) {
+            Order existing = getOrderByIdempotencyKey(normalizedIdempKey);
+            if (existing != null) {
+                return existing;
+            }
+        }
+
         Timestamp created = Timestamp.from(Instant.now());
-        String insertOrderSql = "INSERT INTO autopix_orders (player, product, price, created) VALUES (?, ?, ?, ?);";
+        Timestamp expires = expiresAt != null ? Timestamp.from(expiresAt) : null;
+
+        String insertOrderSql = "INSERT INTO autopix_orders "
+                + "(player, player_uuid, product, price, subtotal, discount, coupon_code, currency, status, idempotency_key, created, expires_at) "
+                + "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);";
         String insertPixSql = "INSERT INTO autopix_pix_data (payment_id, order_id, status, qr_code) VALUES (?, ?, ?, ?);";
         String insertItemSql = "INSERT INTO autopix_order_items "
-                + "(order_id, item_index, product, quantity, unit_price, pre_commands, commands) "
-                + "VALUES (?, ?, ?, ?, ?, ?, ?);";
+                + "(order_id, item_index, product_id, offer_id, product, description, category, offer_type, duration, currency, "
+                + "quantity, unit_price, line_total, delivery_type, delivery_handler, delivery_snapshot, pre_commands, commands) "
+                + "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);";
 
         try (Connection connection = getConnection()) {
             connection.setAutoCommit(false);
             try (PreparedStatement orderStmt = prepareInsertIdStatement(connection, insertOrderSql)) {
                 orderStmt.setString(1, playerName);
-                orderStmt.setString(2, product.length() > 64 ? product.substring(0, 64) : product);
-                orderStmt.setBigDecimal(3, BigDecimal.valueOf(Double.parseDouble(Float.toString(roundedPrice)))
-                        .setScale(2, RoundingMode.HALF_UP));
-                orderStmt.setTimestamp(4, created);
+                orderStmt.setString(2, playerUuid != null ? playerUuid.toString() : null);
+                orderStmt.setString(3, product.length() > 64 ? product.substring(0, 64) : product);
+                orderStmt.setBigDecimal(4, finalPrice);
+                orderStmt.setBigDecimal(5, subtotal != null ? subtotal.setScale(2, RoundingMode.HALF_UP) : finalPrice);
+                orderStmt.setBigDecimal(6, discount != null ? discount.setScale(2, RoundingMode.HALF_UP) : BigDecimal.ZERO);
+                orderStmt.setString(7, couponCode);
+                orderStmt.setString(8, "BRL");
+                orderStmt.setString(9, "PENDING");
+                orderStmt.setString(10, normalizedIdempKey);
+                orderStmt.setTimestamp(11, created);
+                orderStmt.setTimestamp(12, expires);
+
                 if (orderStmt.executeUpdate() == 0) {
                     connection.rollback();
                     return null;
@@ -377,8 +393,10 @@ public class OrderManager {
                     orderId = keys.getInt(1);
                 }
 
-                Order order = new Order(playerName, product, roundedPrice, created.getTime());
+                Order order = new Order(playerName, playerUuid, product, finalPrice, subtotal, discount, created.getTime());
                 order.setId(orderId);
+                order.setCouponSnapshot(couponCode);
+                order.setExpiresAt(expiresAt);
 
                 if (pixData != null) {
                     pixData.setOrderId(orderId);
@@ -400,17 +418,27 @@ public class OrderManager {
                         for (OrderItem item : items) {
                             itemStmt.setInt(1, orderId);
                             itemStmt.setInt(2, index++);
-                            itemStmt.setString(3, item.getProduct());
-                            itemStmt.setInt(4, item.getQuantity());
-                            itemStmt.setBigDecimal(5, BigDecimal.valueOf(
-                                    Double.parseDouble(Float.toString(item.getUnitPrice())))
-                                    .setScale(2, RoundingMode.HALF_UP));
-                            itemStmt.setString(6, encodeStringList(item.getPreCommands()));
-                            itemStmt.setString(7, encodeStringList(item.getCommands()));
+                            itemStmt.setString(3, item.getProductId());
+                            itemStmt.setString(4, item.getOfferId() != null ? item.getOfferId() : "default");
+                            itemStmt.setString(5, item.getProduct());
+                            itemStmt.setString(6, item.getDescription());
+                            itemStmt.setString(7, item.getCategory() != null ? item.getCategory() : "general");
+                            itemStmt.setString(8, item.getOfferType() != null ? item.getOfferType() : "ONE_TIME");
+                            itemStmt.setString(9, item.getDuration());
+                            itemStmt.setString(10, item.getCurrency() != null ? item.getCurrency() : "BRL");
+                            itemStmt.setInt(11, item.getQuantity());
+                            itemStmt.setBigDecimal(12, item.getUnitPriceDecimal());
+                            itemStmt.setBigDecimal(13, item.getLineTotalDecimal());
+                            itemStmt.setString(14, item.getDeliveryType() != null ? item.getDeliveryType() : "autopix");
+                            itemStmt.setString(15, item.getDeliveryHandler());
+                            itemStmt.setString(16, item.getDeliverySnapshot());
+                            itemStmt.setString(17, encodeStringList(item.getPreCommands()));
+                            itemStmt.setString(18, encodeStringList(item.getCommands()));
                             itemStmt.addBatch();
                         }
                         itemStmt.executeBatch();
                     }
+                    order.setItems(items);
                 }
 
                 connection.commit();
@@ -422,9 +450,45 @@ public class OrderManager {
                 connection.setAutoCommit(true);
             }
         } catch (SQLException exception) {
+            if (normalizedIdempKey != null) {
+                Order existing = getOrderByIdempotencyKey(normalizedIdempKey);
+                if (existing != null) {
+                    return existing;
+                }
+            }
             logSqlError("Erro ao criar pedido no banco de dados", exception);
             return null;
         }
+    }
+
+    public static Order getOrderByIdempotencyKey(String idempotencyKey) {
+        if (idempotencyKey == null || idempotencyKey.trim().isEmpty()) return null;
+        String sql = "SELECT * FROM autopix_orders WHERE idempotency_key = ? LIMIT 1;";
+        try (Connection connection = getConnection();
+             PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setString(1, idempotencyKey.trim());
+            try (ResultSet result = statement.executeQuery()) {
+                if (result.next()) {
+                    Order order = readOrder(result);
+                    order.setItems(getOrderItems(connection, order.getId()));
+                    return order;
+                }
+            }
+        } catch (SQLException exception) {
+            logSqlError("Erro ao buscar pedido por idempotency_key", exception);
+        }
+        return null;
+    }
+
+    /**
+     * Creates an order, its optional Mercado Pago record and all product snapshots
+     * in one database transaction.
+     */
+    public static Order createOrderWithItems(String playerName, String product, float price,
+                                             PixData pixData, List<OrderItem> items) {
+        BigDecimal decPrice = BigDecimal.valueOf(roundPrice(price)).setScale(2, RoundingMode.HALF_UP);
+        UUID playerUuid = getOnlinePlayerUuid(playerName);
+        return createOrderDetailed(playerName, playerUuid, product, decPrice, decPrice, BigDecimal.ZERO, null, null, pixData, items);
     }
 
     private static String encodeStringList(List<String> values) {
@@ -457,35 +521,73 @@ public class OrderManager {
     }
 
     public static List<OrderItem> getOrderItems(int orderId) {
+        try (Connection connection = getConnection()) {
+            return getOrderItems(connection, orderId);
+        } catch (SQLException exception) {
+            logSqlError("Erro ao consultar itens do pedido #" + orderId, exception);
+            return new ArrayList<>();
+        }
+    }
+
+    public static List<OrderItem> getOrderItems(Connection connection, int orderId) throws SQLException {
         List<OrderItem> items = new ArrayList<>();
-        String sql = "SELECT product, quantity, unit_price, pre_commands, commands "
-                + "FROM autopix_order_items WHERE order_id = ? ORDER BY item_index ASC;";
-        try (Connection connection = getConnection();
-             PreparedStatement statement = connection.prepareStatement(sql)) {
+        String sql = "SELECT * FROM autopix_order_items WHERE order_id = ? ORDER BY item_index ASC;";
+        try (PreparedStatement statement = connection.prepareStatement(sql)) {
             statement.setInt(1, orderId);
             try (ResultSet result = statement.executeQuery()) {
                 while (result.next()) {
+                    String product = result.getString("product");
+                    String productId = result.getString("product_id");
+                    if (productId == null || productId.trim().isEmpty()) {
+                        productId = product;
+                    }
+                    String offerId = result.getString("offer_id");
+                    if (offerId == null || offerId.trim().isEmpty()) {
+                        offerId = "default";
+                    }
+                    String description = result.getString("description");
+                    String category = result.getString("category");
+                    if (category == null || category.trim().isEmpty()) {
+                        category = "general";
+                    }
+                    String offerType = result.getString("offer_type");
+                    if (offerType == null || offerType.trim().isEmpty()) {
+                        offerType = "ONE_TIME";
+                    }
+                    String duration = result.getString("duration");
+                    String currency = result.getString("currency");
+                    if (currency == null || currency.trim().isEmpty()) {
+                        currency = "BRL";
+                    }
+                    int quantity = result.getInt("quantity");
+                    BigDecimal unitPrice = result.getBigDecimal("unit_price");
+                    BigDecimal unitPriceDecimal = unitPrice != null
+                            ? unitPrice.setScale(2, RoundingMode.HALF_UP)
+                            : BigDecimal.valueOf(roundPrice(result.getDouble("unit_price"))).setScale(2, RoundingMode.HALF_UP);
+
+                    BigDecimal lt = result.getBigDecimal("line_total");
+                    BigDecimal lineTotal = lt != null
+                            ? lt.setScale(2, RoundingMode.HALF_UP)
+                            : unitPriceDecimal.multiply(BigDecimal.valueOf(quantity)).setScale(2, RoundingMode.HALF_UP);
+
+                    String deliveryType = result.getString("delivery_type");
+                    if (deliveryType == null || deliveryType.trim().isEmpty()) {
+                        deliveryType = "autopix";
+                    }
+                    String deliveryHandler = result.getString("delivery_handler");
+                    String deliverySnapshot = result.getString("delivery_snapshot");
+
                     items.add(new OrderItem(
-                            result.getString("product"),
-                            result.getInt("quantity"),
-                            roundPrice(result.getDouble("unit_price")),
+                            productId, offerId, product, description, category,
+                            offerType, duration, currency, quantity,
+                            unitPriceDecimal, lineTotal,
+                            deliveryType, deliveryHandler, deliverySnapshot,
                             decodeStringList(result.getString("pre_commands")),
                             decodeStringList(result.getString("commands"))));
                 }
             }
-        } catch (SQLException exception) {
-            logSqlError("Erro ao consultar itens do pedido #" + orderId, exception);
         }
         return items;
-    }
-
-    private static void insertDeliveryOutbox(Connection connection, int orderId) throws SQLException {
-        String sql = "INSERT INTO autopix_deliveries (order_id, status, attempts, updated_at, last_error) "
-                + "VALUES (?, 'pending', 0, CURRENT_TIMESTAMP, NULL);";
-        try (PreparedStatement statement = connection.prepareStatement(sql)) {
-            statement.setInt(1, orderId);
-            statement.executeUpdate();
-        }
     }
 
     private static PreparedStatement prepareInsertIdStatement(Connection connection, String sql) throws SQLException {
@@ -541,7 +643,12 @@ public class OrderManager {
              PreparedStatement statement = connection.prepareStatement(sql)) {
             statement.setInt(1, orderId);
             try (ResultSet result = statement.executeQuery()) {
-                return result.next() ? readOrder(result) : null;
+                if (result.next()) {
+                    Order order = readOrder(result);
+                    order.setItems(getOrderItems(connection, order.getId()));
+                    return order;
+                }
+                return null;
             }
         } catch (SQLException exception) {
             logSqlError("Erro ao buscar pedido #" + orderId, exception);
@@ -549,13 +656,111 @@ public class OrderManager {
         }
     }
 
-    private static Order readOrder(ResultSet result) throws SQLException {
+    public static Order getOrder(String orderId) {
+        if (orderId == null) return null;
+        try {
+            return getOrderById(Integer.parseInt(orderId.trim()));
+        } catch (NumberFormatException ignored) {
+            return null;
+        }
+    }
+
+    public static List<Order> getOrdersByPlayerUuid(UUID playerUuid, int limit) {
+        List<Order> orders = new ArrayList<>();
+        if (playerUuid == null) return orders;
+        String sql = "SELECT * FROM autopix_orders WHERE player_uuid = ? ORDER BY created DESC, id DESC LIMIT ?;";
+        try (Connection connection = getConnection();
+             PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setString(1, playerUuid.toString());
+            statement.setInt(2, Math.max(1, limit));
+            try (ResultSet result = statement.executeQuery()) {
+                while (result.next()) orders.add(readOrder(result));
+            }
+        } catch (SQLException exception) {
+            logSqlError("Erro ao listar pedidos do UUID " + playerUuid, exception);
+        }
+        return orders;
+    }
+
+    public static boolean updateOrderStatus(int orderId, OrderStatus status) {
+        if (status == null) return false;
+        String sql = "UPDATE autopix_orders SET status = ? WHERE id = ?;";
+        try (Connection connection = getConnection();
+             PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setString(1, status.name());
+            statement.setInt(2, orderId);
+            return statement.executeUpdate() > 0;
+        } catch (SQLException exception) {
+            logSqlError("Erro ao atualizar status do pedido #" + orderId, exception);
+            return false;
+        }
+    }
+
+    public static boolean cancelOrder(int orderId, String reason) {
+        String sql = "UPDATE autopix_orders SET status = 'CANCELLED', cancelled_at = CURRENT_TIMESTAMP WHERE id = ? AND pix IS NULL;";
+        try (Connection connection = getConnection();
+             PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setInt(1, orderId);
+            boolean updated = statement.executeUpdate() > 0;
+            if (updated) {
+                Order order = getOrderById(orderId);
+                if (order != null) {
+                    PixData pd = getPixData(order);
+                    if (pd != null) cancelPendingPixData(pd);
+                }
+            }
+            return updated;
+        } catch (SQLException exception) {
+            logSqlError("Erro ao cancelar pedido #" + orderId, exception);
+            return false;
+        }
+    }
+
+    public static Order readOrder(ResultSet result) throws SQLException {
         Timestamp created = result.getTimestamp("created");
         long createdMillis = created != null ? created.getTime() : System.currentTimeMillis();
-        Order order = new Order(result.getString("player"), result.getString("product"),
-                roundPrice(result.getDouble("price")), createdMillis);
+        String playerName = result.getString("player");
+        String productName = result.getString("product");
+        BigDecimal priceDec = result.getBigDecimal("price");
+        float price = priceDec != null ? priceDec.floatValue() : roundPrice(result.getDouble("price"));
+        Order order = new Order(playerName, productName, price, createdMillis);
+        if (priceDec != null) {
+            order.setTotal(priceDec.setScale(2, RoundingMode.HALF_UP));
+        }
         order.setId(result.getInt("id"));
         order.setTransaction(result.getString("pix"));
+
+        String uuidStr = result.getString("player_uuid");
+        if (uuidStr != null && !uuidStr.trim().isEmpty()) {
+            try {
+                order.setPlayerUuid(UUID.fromString(uuidStr.trim()));
+            } catch (IllegalArgumentException ignored) {
+            }
+        }
+
+        String statusStr = result.getString("status");
+        if (statusStr != null && !statusStr.trim().isEmpty()) {
+            try {
+                order.setStatus(OrderStatus.valueOf(statusStr.trim().toUpperCase(Locale.ROOT)));
+            } catch (IllegalArgumentException ignored) {
+            }
+        }
+
+        BigDecimal subtotal = result.getBigDecimal("subtotal");
+        if (subtotal != null) order.setSubtotal(subtotal.setScale(2, RoundingMode.HALF_UP));
+        BigDecimal discount = result.getBigDecimal("discount");
+        if (discount != null) order.setDiscount(discount.setScale(2, RoundingMode.HALF_UP));
+        String coupon = result.getString("coupon_code");
+        if (coupon != null) order.setCouponSnapshot(coupon);
+        String cur = result.getString("currency");
+        if (cur != null) order.setCurrency(cur);
+        Timestamp exp = result.getTimestamp("expires_at");
+        if (exp != null) order.setExpiresAt(exp.toInstant());
+        Timestamp paid = result.getTimestamp("paid_at");
+        if (paid != null && (order.getStatus() == OrderStatus.CREATED || order.getStatus() == OrderStatus.PENDING)) {
+            order.setStatus(OrderStatus.PAID);
+        }
+
         return order;
     }
 
@@ -575,6 +780,26 @@ public class OrderManager {
             }
         } catch (SQLException exception) {
             logSqlError("Erro ao consultar dados PIX do pedido #" + order.getId(), exception);
+        }
+        return null;
+    }
+
+    public static PixData getPixDataByPaymentId(String paymentId) {
+        if (paymentId == null || paymentId.trim().isEmpty()) return null;
+        String sql = "SELECT * FROM autopix_pix_data WHERE payment_id = ?;";
+        try (Connection connection = getConnection();
+             PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setString(1, paymentId.trim());
+            try (ResultSet result = statement.executeQuery()) {
+                if (result.next()) {
+                    PixData pixData = new PixData(result.getString("payment_id"), result.getString("qr_code"));
+                    pixData.setOrderId(result.getInt("order_id"));
+                    pixData.setStatus(result.getString("status"));
+                    return pixData;
+                }
+            }
+        } catch (SQLException exception) {
+            logSqlError("Erro ao consultar dados PIX pelo payment_id " + paymentId, exception);
         }
         return null;
     }
@@ -623,13 +848,15 @@ public class OrderManager {
         if (order == null || transactionId == null || transactionId.trim().isEmpty()) {
             return false;
         }
-        String updateOrder = "UPDATE autopix_orders SET pix = ? WHERE id = ? AND pix IS NULL;";
+        String updateOrder = "UPDATE autopix_orders SET pix = ?, status = 'PAID', paid_at = CURRENT_TIMESTAMP WHERE id = ? AND pix IS NULL;";
         String updatePayment = "UPDATE autopix_pix_data SET status = 'approved' WHERE order_id = ? AND status = 'pending';";
+        String updatePaymentRecord = "UPDATE autopix_payments SET status = 'PAID', paid_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE order_id = ?;";
 
         try (Connection connection = getConnection()) {
             connection.setAutoCommit(false);
             try (PreparedStatement orderStatement = connection.prepareStatement(updateOrder);
-                 PreparedStatement paymentStatement = connection.prepareStatement(updatePayment)) {
+                 PreparedStatement paymentStatement = connection.prepareStatement(updatePayment);
+                 PreparedStatement paymentRecordStatement = connection.prepareStatement(updatePaymentRecord)) {
                 orderStatement.setString(1, transactionId.trim());
                 orderStatement.setInt(2, order.getId());
                 if (orderStatement.executeUpdate() != 1) {
@@ -640,10 +867,18 @@ public class OrderManager {
                 paymentStatement.setInt(1, order.getId());
                 paymentStatement.executeUpdate();
 
-                insertDeliveryOutbox(connection, order.getId());
+                paymentRecordStatement.setInt(1, order.getId());
+                paymentRecordStatement.executeUpdate();
+
+                List<OrderItem> orderItems = getOrderItems(connection, order.getId());
+                UUID playerUuid = order.getPlayerUuid() != null
+                        ? order.getPlayerUuid()
+                        : getOnlinePlayerUuid(order.getPlayer());
+                DeliveryManager.ensureOutboxQueued(connection, order.getId(), orderItems, playerUuid);
+
                 connection.commit();
                 order.setTransaction(transactionId.trim());
-                return true;
+                order.setStatus(OrderStatus.PAID);
             } catch (SQLException exception) {
                 connection.rollback();
                 throw exception;
@@ -654,19 +889,23 @@ public class OrderManager {
             logSqlError("Erro ao aprovar manualmente o pedido #" + order.getId(), exception);
             return false;
         }
+        SubscriptionManager.onOrderPaymentApproved(order.getId(), null, transactionId.trim(), order.getTotal());
+        return true;
     }
 
     public static boolean approvePayment(PixData pixData, Order order, String transactionId) {
         if (pixData == null || order == null || transactionId == null || transactionId.trim().isEmpty()) {
             return false;
         }
-        String updateOrder = "UPDATE autopix_orders SET pix = ? WHERE id = ? AND pix IS NULL;";
+        String updateOrder = "UPDATE autopix_orders SET pix = ?, status = 'PAID', paid_at = CURRENT_TIMESTAMP WHERE id = ? AND pix IS NULL;";
         String updatePayment = "UPDATE autopix_pix_data SET status = 'approved' WHERE payment_id = ? AND status = 'pending';";
+        String updatePaymentRecord = "UPDATE autopix_payments SET status = 'PAID', paid_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE payment_id = ? OR order_id = ?;";
 
         try (Connection connection = getConnection()) {
             connection.setAutoCommit(false);
             try (PreparedStatement orderStatement = connection.prepareStatement(updateOrder);
-                 PreparedStatement paymentStatement = connection.prepareStatement(updatePayment)) {
+                 PreparedStatement paymentStatement = connection.prepareStatement(updatePayment);
+                 PreparedStatement paymentRecordStatement = connection.prepareStatement(updatePaymentRecord)) {
                 orderStatement.setString(1, transactionId.trim());
                 orderStatement.setInt(2, order.getId());
                 if (orderStatement.executeUpdate() != 1) {
@@ -680,11 +919,20 @@ public class OrderManager {
                     return false;
                 }
 
-                insertDeliveryOutbox(connection, order.getId());
+                paymentRecordStatement.setString(1, pixData.getPaymentId());
+                paymentRecordStatement.setInt(2, order.getId());
+                paymentRecordStatement.executeUpdate();
+
+                List<OrderItem> orderItems = getOrderItems(connection, order.getId());
+                UUID playerUuid = order.getPlayerUuid() != null
+                        ? order.getPlayerUuid()
+                        : getOnlinePlayerUuid(order.getPlayer());
+                DeliveryManager.ensureOutboxQueued(connection, order.getId(), orderItems, playerUuid);
+
                 connection.commit();
                 pixData.setStatus("approved");
                 order.setTransaction(transactionId.trim());
-                return true;
+                order.setStatus(OrderStatus.PAID);
             } catch (SQLException exception) {
                 connection.rollback();
                 throw exception;
@@ -695,17 +943,27 @@ public class OrderManager {
             logSqlError("Erro ao aprovar pagamento #" + pixData.getPaymentId(), exception);
             return false;
         }
+        SubscriptionManager.onOrderPaymentApproved(
+                order.getId(), pixData.getPaymentId(), transactionId.trim(), order.getTotal());
+        return true;
     }
 
     public static boolean setPixDataStatus(PixData pixData, String status) {
         if (pixData == null || status == null || status.trim().isEmpty()) return false;
         String sql = "UPDATE autopix_pix_data SET status = ? WHERE payment_id = ? AND status <> 'approved';";
+        String updatePaymentTbl = "UPDATE autopix_payments SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE payment_id = ? AND status <> 'PAID' AND status <> 'APPROVED';";
         try (Connection connection = getConnection();
-             PreparedStatement statement = connection.prepareStatement(sql)) {
+             PreparedStatement statement = connection.prepareStatement(sql);
+             PreparedStatement payStmt = connection.prepareStatement(updatePaymentTbl)) {
             statement.setString(1, status.trim());
             statement.setString(2, pixData.getPaymentId());
             boolean updated = statement.executeUpdate() > 0;
-            if (updated) pixData.setStatus(status.trim());
+            if (updated) {
+                pixData.setStatus(status.trim());
+                payStmt.setString(1, status.trim().toUpperCase(Locale.ROOT));
+                payStmt.setString(2, pixData.getPaymentId());
+                payStmt.executeUpdate();
+            }
             return updated;
         } catch (SQLException exception) {
             logSqlError("Erro ao atualizar status do pagamento #" + pixData.getPaymentId(), exception);
@@ -716,11 +974,17 @@ public class OrderManager {
     public static boolean cancelPendingPixData(PixData pixData) {
         if (pixData == null) return false;
         String sql = "UPDATE autopix_pix_data SET status = 'cancelled' WHERE payment_id = ? AND status = 'pending';";
+        String updatePaymentTbl = "UPDATE autopix_payments SET status = 'CANCELLED', updated_at = CURRENT_TIMESTAMP WHERE payment_id = ? AND status = 'PENDING';";
         try (Connection connection = getConnection();
-             PreparedStatement statement = connection.prepareStatement(sql)) {
+             PreparedStatement statement = connection.prepareStatement(sql);
+             PreparedStatement payStmt = connection.prepareStatement(updatePaymentTbl)) {
             statement.setString(1, pixData.getPaymentId());
             boolean updated = statement.executeUpdate() > 0;
-            if (updated) pixData.setStatus("cancelled");
+            if (updated) {
+                pixData.setStatus("cancelled");
+                payStmt.setString(1, pixData.getPaymentId());
+                payStmt.executeUpdate();
+            }
             return updated;
         } catch (SQLException exception) {
             logSqlError("Erro ao cancelar pagamento pendente #" + pixData.getPaymentId(), exception);
@@ -728,7 +992,219 @@ public class OrderManager {
         }
     }
 
-    protected static void validatePendings(AutoPix ap) {
+    public static boolean savePayment(Payment payment, int orderId, BigDecimal amount) {
+        if (payment == null) return false;
+        String sql = "INSERT INTO autopix_payments (payment_id, order_id, method, amount, status, qr_code, qr_code_base64, copy_paste, expires_at, created_at, updated_at) "
+                + "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);";
+        try (Connection connection = getConnection();
+             PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setString(1, payment.getId());
+            statement.setInt(2, orderId);
+            statement.setString(3, "pix");
+            statement.setBigDecimal(4, amount != null ? amount.setScale(2, RoundingMode.HALF_UP) : BigDecimal.ZERO);
+            statement.setString(5, payment.getStatus().name());
+            statement.setString(6, payment.getQrCode());
+            statement.setString(7, null);
+            statement.setString(8, payment.getCopyPasteCode());
+            statement.setTimestamp(9, payment.getExpirationAt() != null ? Timestamp.from(payment.getExpirationAt()) : null);
+            return statement.executeUpdate() > 0;
+        } catch (SQLException exception) {
+            logSqlError("Erro ao salvar registro de pagamento #" + payment.getId(), exception);
+            return false;
+        }
+    }
+
+    public static Payment getPayment(String paymentId) {
+        if (paymentId == null) return null;
+        String sql = "SELECT * FROM autopix_payments WHERE payment_id = ?;";
+        try (Connection connection = getConnection();
+             PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setString(1, paymentId);
+            try (ResultSet result = statement.executeQuery()) {
+                if (result.next()) {
+                    String id = result.getString("payment_id");
+                    String statusStr = result.getString("status");
+                    PaymentStatus status = PaymentStatus.PENDING;
+                    try {
+                        if (statusStr != null) status = PaymentStatus.valueOf(statusStr.toUpperCase(Locale.ROOT));
+                    } catch (Exception ignored) {}
+                    String qrCode = result.getString("qr_code");
+                    String copyPaste = result.getString("copy_paste");
+                    Timestamp exp = result.getTimestamp("expires_at");
+                    Instant expInstant = exp != null ? exp.toInstant() : null;
+                    return new Payment(id, id, status, qrCode, copyPaste, null, expInstant);
+                }
+            }
+        } catch (SQLException exception) {
+            logSqlError("Erro ao consultar pagamento #" + paymentId, exception);
+        }
+        return null;
+    }
+
+    public static Payment getPaymentByOrderId(int orderId) {
+        String sql = "SELECT * FROM autopix_payments WHERE order_id = ?;";
+        try (Connection connection = getConnection();
+             PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setInt(1, orderId);
+            try (ResultSet result = statement.executeQuery()) {
+                if (result.next()) {
+                    String id = result.getString("payment_id");
+                    String statusStr = result.getString("status");
+                    PaymentStatus status = PaymentStatus.PENDING;
+                    try {
+                        if (statusStr != null) status = PaymentStatus.valueOf(statusStr.toUpperCase(Locale.ROOT));
+                    } catch (Exception ignored) {}
+                    String qrCode = result.getString("qr_code");
+                    String copyPaste = result.getString("copy_paste");
+                    Timestamp exp = result.getTimestamp("expires_at");
+                    Instant expInstant = exp != null ? exp.toInstant() : null;
+                    return new Payment(id, id, status, qrCode, copyPaste, null, expInstant);
+                }
+            }
+        } catch (SQLException exception) {
+            logSqlError("Erro ao consultar pagamento pelo pedido #" + orderId, exception);
+        }
+        return null;
+    }
+
+    /**
+     * Reconciles a single payment by consulting the Mercado Pago API directly,
+     * verifying currency, external reference, and exact BigDecimal amount,
+     * and executing state transitions / outbox queuing regardless of whether the player is online.
+     */
+    public static boolean reconcilePaymentById(AutoPix ap, String paymentId) {
+        if (paymentId == null || paymentId.trim().isEmpty()) {
+            return false;
+        }
+        PixData pd = getPixDataByPaymentId(paymentId.trim());
+        if (pd == null) {
+            return false;
+        }
+        return reconcilePixData(ap, pd);
+    }
+
+    public static boolean reconcilePixData(AutoPix ap, PixData pd) {
+        if (pd == null) return false;
+        Order order = getOrderById(pd.getOrderId());
+        if (order == null) return false;
+
+        if (order.isValidated()) {
+            if (!"approved".equalsIgnoreCase(pd.getStatus())) {
+                setPixDataStatus(pd, "approved");
+            }
+            return true;
+        }
+
+        PaymentInfo info = MercadoPagoAPI.getPayment(ap, pd.getPaymentId());
+        if (info == null || info.getStatus() == null) {
+            return false;
+        }
+
+        String mpStatus = info.getStatus().trim().toLowerCase(Locale.ROOT);
+        if (!"approved".equals(mpStatus)) {
+            if (!mpStatus.equalsIgnoreCase(pd.getStatus())) {
+                if (setPixDataStatus(pd, mpStatus)) {
+                    if ("cancelled".equals(mpStatus)) {
+                        updateOrderStatusIfUnpaid(order.getId(), OrderStatus.CANCELLED);
+                        SubscriptionManager.onOrderPaymentFailed(order.getId(), pd.getPaymentId(), mpStatus);
+                    } else if ("rejected".equals(mpStatus) || "expired".equals(mpStatus)) {
+                        updateOrderStatusIfUnpaid(
+                                order.getId(), "expired".equals(mpStatus) ? OrderStatus.EXPIRED : OrderStatus.FAILED);
+                        SubscriptionManager.onOrderPaymentFailed(order.getId(), pd.getPaymentId(), mpStatus);
+                    }
+                    handleNonApprovedStatusTransition(ap, order, pd, mpStatus, info.getPaidAmount());
+                }
+            }
+            return true;
+        }
+
+        String currency = info.getCurrencyId();
+        if (currency != null && !currency.trim().isEmpty() && !"BRL".equalsIgnoreCase(currency.trim())) {
+            if (ap != null) {
+                ap.getLogger().warning("Pagamento #" + pd.getPaymentId() + " rejeitado por moeda invalida: " + currency);
+            }
+            if (setPixDataStatus(pd, "currency_mismatch")) {
+                updateOrderStatusIfUnpaid(order.getId(), OrderStatus.FAILED);
+                SubscriptionManager.onOrderPaymentFailed(order.getId(), pd.getPaymentId(), "currency_mismatch");
+                handleNonApprovedStatusTransition(ap, order, pd, "currency_mismatch", info.getPaidAmount());
+            }
+            return false;
+        }
+
+        String extRef = info.getExternalReference();
+        if (extRef != null && !extRef.trim().isEmpty()) {
+            String trimmedRef = extRef.trim();
+            String expectedId = Integer.toString(order.getId());
+            boolean validRef = trimmedRef.equals(expectedId)
+                    || trimmedRef.equalsIgnoreCase("order:" + expectedId)
+                    || trimmedRef.equalsIgnoreCase("order_" + expectedId)
+                    || trimmedRef.equalsIgnoreCase("autopix:" + expectedId)
+                    || trimmedRef.equalsIgnoreCase(order.getProduct());
+            if (!validRef) {
+                if (ap != null) {
+                    ap.getLogger().warning("Pagamento #" + pd.getPaymentId()
+                            + " rejeitado por divergencia de referencia externa (pedido #" + order.getId()
+                            + ", ref=" + trimmedRef + ").");
+                }
+                if (setPixDataStatus(pd, "reference_mismatch")) {
+                    updateOrderStatusIfUnpaid(order.getId(), OrderStatus.FAILED);
+                    SubscriptionManager.onOrderPaymentFailed(order.getId(), pd.getPaymentId(), "reference_mismatch");
+                    handleNonApprovedStatusTransition(ap, order, pd, "reference_mismatch", info.getPaidAmount());
+                }
+                return false;
+            }
+        }
+
+        if (toCents(order.getTotal()) != toCents(info.getPaidAmountDecimal())) {
+            if (ap != null) {
+                ap.getLogger().warning("Pagamento aprovado com valor divergente. Pedido #" + order.getId()
+                        + " (esperado R$" + String.format(Locale.ROOT, "%.2f", order.getPrice())
+                        + ", pago R$" + String.format(Locale.ROOT, "%.2f", info.getPaidAmount())
+                        + ") foi mantido sem entrega; verifique no Mercado Pago.");
+            }
+            if (setPixDataStatus(pd, "amount_mismatch")) {
+                updateOrderStatusIfUnpaid(order.getId(), OrderStatus.FAILED);
+                SubscriptionManager.onOrderPaymentFailed(order.getId(), pd.getPaymentId(), "amount_mismatch");
+                handleNonApprovedStatusTransition(ap, order, pd, "amount_mismatch", info.getPaidAmount());
+            }
+            return false;
+        }
+
+        if (info.getTransactionId() == null || info.getTransactionId().trim().isEmpty()) {
+            return false;
+        }
+
+        List<OrderItem> orderItems = getOrderItems(order.getId());
+        OrderProduct op = (orderItems.isEmpty() && ap != null) ? InventoryManager.getProductByOrder(order) : null;
+
+        if (!approvePayment(pd, order, info.getTransactionId())) {
+            return order.isValidated() || getOrderById(order.getId()).isValidated();
+        }
+
+        if (orderItems.isEmpty() && op != null) {
+            deliverApprovedOrderOnMainThread(ap, order, op, pd.getPaymentId(), info.getTransactionId());
+        } else {
+            deliverApprovedOrderOnMainThread(ap, order, orderItems, pd.getPaymentId(), info.getTransactionId());
+        }
+        return true;
+    }
+
+    private static void updateOrderStatusIfUnpaid(int orderId, OrderStatus status) {
+        String sql = "UPDATE autopix_orders SET status = ? WHERE id = ? AND pix IS NULL;";
+        try (Connection connection = getConnection();
+             PreparedStatement stmt = connection.prepareStatement(sql)) {
+            stmt.setString(1, status.name());
+            stmt.setInt(2, orderId);
+            stmt.executeUpdate();
+        } catch (SQLException ex) {
+            logSqlError("Erro ao atualizar status nao aprovado do pedido #" + orderId, ex);
+        }
+    }
+
+    public static void validatePendings(AutoPix ap) {
+        if (!isDatabaseReady() || SHUTTING_DOWN.get()) {
+            return;
+        }
         if (!VALIDATION_RUNNING.compareAndSet(false, true)) {
             return;
         }
@@ -737,53 +1213,8 @@ public class OrderManager {
             if (pendings.isEmpty()) return;
 
             for (PixData pd : pendings) {
-                Order order = getOrderById(pd.getOrderId());
-                if (order == null) continue;
-                if (order.isValidated()) {
-                    setPixDataStatus(pd, "approved");
-                    continue;
-                }
-
-                if (!isPlayerOnline(order.getPlayer())) continue;
-
-                List<OrderItem> orderItems = getOrderItems(order.getId());
-                OrderProduct op = orderItems.isEmpty() ? InventoryManager.getProductByOrder(order) : null;
-                if (orderItems.isEmpty() && op == null) continue;
-
-                PaymentInfo info = MercadoPagoAPI.getPayment(ap, pd.getPaymentId());
-                if (info == null || info.getStatus() == null) continue;
-
-                String mpStatus = info.getStatus().trim().toLowerCase(Locale.ROOT);
-                if (!"approved".equals(mpStatus)) {
-                    if (!mpStatus.equalsIgnoreCase(pd.getStatus())) {
-                        if (setPixDataStatus(pd, mpStatus)) {
-                            handleNonApprovedStatusTransition(ap, order, pd, mpStatus, info.getPaidAmount());
-                        }
-                    }
-                    continue;
-                }
-
-                if (toCents(order.getPrice()) != toCents(info.getPaidAmount())) {
-                    ap.getLogger().warning("Pagamento aprovado com valor divergente. Pedido #" + order.getId()
-                            + " (esperado R$" + String.format(Locale.ROOT, "%.2f", order.getPrice())
-                            + ", pago R$" + String.format(Locale.ROOT, "%.2f", info.getPaidAmount())
-                            + ") foi mantido sem entrega; verifique no Mercado Pago.");
-                    if (setPixDataStatus(pd, "amount_mismatch")) {
-                        handleNonApprovedStatusTransition(ap, order, pd, "amount_mismatch", info.getPaidAmount());
-                    }
-                    continue;
-                }
-
-                if (info.getTransactionId() == null || info.getTransactionId().trim().isEmpty()) continue;
-                if (!isPlayerOnline(order.getPlayer())) continue;
-
-                if (!approvePayment(pd, order, info.getTransactionId())) continue;
-
-                if (orderItems.isEmpty()) {
-                    deliverApprovedOrderOnMainThread(ap, order, op, pd.getPaymentId(), info.getTransactionId());
-                } else {
-                    deliverApprovedOrderOnMainThread(ap, order, orderItems, pd.getPaymentId(), info.getTransactionId());
-                }
+                if (SHUTTING_DOWN.get()) break;
+                reconcilePixData(ap, pd);
             }
         } finally {
             VALIDATION_RUNNING.set(false);
@@ -792,261 +1223,99 @@ public class OrderManager {
 
     private static void handleNonApprovedStatusTransition(AutoPix ap, Order order, PixData pd,
                                                           String newStatus, double paidAmount) {
-        refreshStatsCacheAsync(ap);
-        UUID playerUuid = getOnlinePlayerUuid(order.getPlayer());
-
-        new BukkitRunnable() {
-            @Override
-            public void run() {
-                Player p = Bukkit.getPlayerExact(order.getPlayer());
-                if ("cancelled".equalsIgnoreCase(newStatus)) {
-                    if (p != null && p.isOnline()) {
-                        InventoryManager.removeUnpaidMaps(p);
-                        SoundManager.play(p, SoundManager.PAYMENT_CANCELLED);
-                        MSG.sendActionBar(p, "actionbar-cancelado");
-                        InventoryManager.refreshOpenInventory(p);
-                    }
-                    AutoPixEventDispatcher.dispatch(new PaymentCancelledEvent(
-                            order.getId(), order.getPlayer(), playerUuid,
-                            order.getProduct(), order.getPrice(), pd.getPaymentId(),
-                            newStatus, "external"));
-                } else if ("rejected".equalsIgnoreCase(newStatus) || "amount_mismatch".equalsIgnoreCase(newStatus)) {
-                    if (p != null && p.isOnline()) {
-                        InventoryManager.removeUnpaidMaps(p);
-                        SoundManager.play(p, SoundManager.PAYMENT_REJECTED);
-                        MSG.sendTitle(p, "titulo-rejeitado", "subtitulo-rejeitado", 10, 60, 20,
-                                "{id}", Integer.toString(order.getId()),
-                                "{produto}", order.getProduct(),
-                                "{status}", newStatus);
-                        MSG.sendMessage(p, "pagamento-rejeitado-chat",
-                                "{id}", Integer.toString(order.getId()),
-                                "{produto}", order.getProduct(),
-                                "{status}", newStatus);
-                        InventoryManager.refreshOpenInventory(p);
-                    }
-                    AutoPixEventDispatcher.dispatch(new PaymentRejectedEvent(
-                            order.getId(), order.getPlayer(), playerUuid,
-                            order.getProduct(), order.getPrice(), paidAmount,
-                            pd.getPaymentId(), newStatus, newStatus));
-                }
-            }
-        }.runTask(ap);
-    }
-
-    private static boolean claimDelivery(int orderId) {
-        String sql = "UPDATE autopix_deliveries SET status = 'processing', attempts = attempts + 1, "
-                + "updated_at = CURRENT_TIMESTAMP, last_error = NULL WHERE order_id = ? AND status = 'pending';";
-        try (Connection connection = getConnection();
-             PreparedStatement statement = connection.prepareStatement(sql)) {
-            statement.setInt(1, orderId);
-            return statement.executeUpdate() == 1;
-        } catch (SQLException exception) {
-            logSqlError("Erro ao reservar entrega do pedido #" + orderId, exception);
-            return false;
+        if (ap != null) {
+            refreshStatsCacheAsync(ap);
         }
-    }
+        UUID playerUuid = order.getPlayerUuid() != null
+                ? order.getPlayerUuid()
+                : getOnlinePlayerUuid(order.getPlayer());
 
-    private static void completeDeliveryAsync(AutoPix ap, int orderId, String status, String error) {
-        Bukkit.getScheduler().runTaskAsynchronously(ap, () -> {
-            String sql = "UPDATE autopix_deliveries SET status = ?, updated_at = CURRENT_TIMESTAMP, last_error = ? "
-                    + "WHERE order_id = ? AND status = 'processing';";
-            try (Connection connection = getConnection();
-                 PreparedStatement statement = connection.prepareStatement(sql)) {
-                statement.setString(1, status);
-                statement.setString(2, error);
-                statement.setInt(3, orderId);
-                if (statement.executeUpdate() != 1) {
-                    ap.getLogger().warning("Nao foi possivel finalizar o registro de entrega do pedido #" + orderId
-                            + ". Verifique autopix_deliveries.");
+        Runnable task = () -> {
+            Player p = Bukkit.getServer() != null ? Bukkit.getPlayerExact(order.getPlayer()) : null;
+            if ("cancelled".equalsIgnoreCase(newStatus)) {
+                if (p != null && p.isOnline() && ap != null) {
+                    InventoryManager.removeUnpaidMaps(p);
+                    SoundManager.play(p, SoundManager.PAYMENT_CANCELLED);
+                    MSG.sendActionBar(p, "actionbar-cancelado");
+                    InventoryManager.refreshOpenInventory(p);
                 }
-            } catch (SQLException exception) {
-                logSqlError("Erro ao finalizar entrega do pedido #" + orderId, exception);
+                AutoPixEventDispatcher.dispatch(new PaymentCancelledEvent(
+                        order.getId(), order.getPlayer(), playerUuid,
+                        order.getProduct(), order.getPrice(), pd.getPaymentId(),
+                        newStatus, "external"));
+            } else if ("rejected".equalsIgnoreCase(newStatus)
+                    || "amount_mismatch".equalsIgnoreCase(newStatus)
+                    || "currency_mismatch".equalsIgnoreCase(newStatus)
+                    || "reference_mismatch".equalsIgnoreCase(newStatus)) {
+                if (p != null && p.isOnline() && ap != null) {
+                    InventoryManager.removeUnpaidMaps(p);
+                    SoundManager.play(p, SoundManager.PAYMENT_REJECTED);
+                    MSG.sendTitle(p, "titulo-rejeitado", "subtitulo-rejeitado", 10, 60, 20,
+                            "{id}", Integer.toString(order.getId()),
+                            "{produto}", order.getProduct(),
+                            "{status}", newStatus);
+                    MSG.sendMessage(p, "pagamento-rejeitado-chat",
+                            "{id}", Integer.toString(order.getId()),
+                            "{produto}", order.getProduct(),
+                            "{status}", newStatus);
+                    InventoryManager.refreshOpenInventory(p);
+                }
+                AutoPixEventDispatcher.dispatch(new PaymentRejectedEvent(
+                        order.getId(), order.getPlayer(), playerUuid,
+                        order.getProduct(), order.getPrice(), paidAmount,
+                        pd.getPaymentId(), newStatus, newStatus));
             }
-        });
-    }
+        };
 
-    private static void markDeliveryForReview(int orderId, String reason) {
-        String sql = "UPDATE autopix_deliveries SET status = 'needs_review', updated_at = CURRENT_TIMESTAMP, "
-                + "last_error = ? WHERE order_id = ? AND status IN ('pending', 'processing');";
-        try (Connection connection = getConnection();
-             PreparedStatement statement = connection.prepareStatement(sql)) {
-            statement.setString(1, reason);
-            statement.setInt(2, orderId);
-            statement.executeUpdate();
-        } catch (SQLException exception) {
-            logSqlError("Erro ao sinalizar entrega para revisao #" + orderId, exception);
+        if (ap != null && ap.isEnabled() && Bukkit.getServer() != null) {
+            new BukkitRunnable() {
+                @Override
+                public void run() {
+                    task.run();
+                }
+            }.runTask(ap);
+        } else {
+            task.run();
         }
     }
 
     public static void recoverPendingDeliveries(AutoPix ap) {
-        if (ap == null || !ap.isEnabled()) return;
-        Bukkit.getScheduler().runTaskAsynchronously(ap, () -> {
-            String interruptedSql = "UPDATE autopix_deliveries SET status = 'needs_review', "
-                    + "updated_at = CURRENT_TIMESTAMP, last_error = 'Servidor reiniciou durante a entrega; "
-                    + "verifique se os comandos de recompensa foram executados antes de repetir.' "
-                    + "WHERE status = 'processing';";
-            try (Connection connection = getConnection();
-                 PreparedStatement statement = connection.prepareStatement(interruptedSql)) {
-                int interrupted = statement.executeUpdate();
-                if (interrupted > 0) {
-                    ap.getLogger().warning(interrupted + " entrega(s) interrompida(s) precisam de revisao manual. "
-                            + "Nao serao repetidas automaticamente para evitar recompensas duplicadas.");
-                }
-            } catch (SQLException exception) {
-                logSqlError("Erro ao recuperar entregas interrompidas", exception);
-                return;
-            }
-
-            List<Integer> pendingIds = new ArrayList<>();
-            try (Connection connection = getConnection();
-                 PreparedStatement statement = connection.prepareStatement(
-                         "SELECT order_id FROM autopix_deliveries WHERE status = 'pending' ORDER BY order_id ASC;");
-                 ResultSet result = statement.executeQuery()) {
-                while (result.next()) pendingIds.add(result.getInt("order_id"));
-            } catch (SQLException exception) {
-                logSqlError("Erro ao listar entregas pendentes", exception);
-                return;
-            }
-
-            for (Integer orderId : pendingIds) {
-                Order order = getOrderById(orderId);
-                if (order == null || !order.isValidated()) {
-                    markDeliveryForReview(orderId, "Pedido nao encontrado ou sem aprovacao registrada.");
-                    continue;
-                }
-                List<OrderItem> orderItems = getOrderItems(orderId);
-                OrderProduct product = orderItems.isEmpty() ? InventoryManager.getProductByOrder(order) : null;
-                if (orderItems.isEmpty() && product == null) {
-                    markDeliveryForReview(orderId, "Produto nao existe mais na configuracao menu.*.produtos.");
-                    ap.getLogger().warning("Entrega do pedido #" + orderId
-                            + " exige revisao: produto ausente na configuracao e snapshot inexistente.");
-                    continue;
-                }
-                PixData pixData = getPixData(order);
-                if (orderItems.isEmpty()) {
-                    deliverApprovedOrderOnMainThread(ap, order, product,
-                            pixData != null ? pixData.getPaymentId() : null, order.getTransaction());
-                } else {
-                    deliverApprovedOrderOnMainThread(ap, order, orderItems,
-                            pixData != null ? pixData.getPaymentId() : null, order.getTransaction());
-                }
-            }
-        });
+        DeliveryManager.recoverPendingDeliveries(ap);
     }
 
     public static void deliverApprovedOrderOnMainThread(AutoPix ap, Order order, OrderProduct op,
                                                         String paymentId, String transactionId) {
-        deliverApprovedOrderInternal(ap, order, op, null, paymentId, transactionId);
+        List<OrderItem> legacyItems = null;
+        if (op != null) {
+            legacyItems = List.of(new OrderItem(
+                    op.getProduct(), "default", op.getProduct(), null, "legacy",
+                    "ONE_TIME", null, "BRL", 1,
+                    BigDecimal.valueOf(roundPrice(op.getPrice())).setScale(2, RoundingMode.HALF_UP),
+                    BigDecimal.valueOf(roundPrice(op.getPrice())).setScale(2, RoundingMode.HALF_UP),
+                    "autopix", null, null,
+                    op.getPreCommands(), op.getCommands()));
+        }
+        deliverApprovedOrderInternal(ap, order, legacyItems, paymentId, transactionId);
     }
 
     public static void deliverApprovedOrderOnMainThread(AutoPix ap, Order order, List<OrderItem> items,
                                                         String paymentId, String transactionId) {
-        deliverApprovedOrderInternal(ap, order, null, items, paymentId, transactionId);
+        deliverApprovedOrderInternal(ap, order, items, paymentId, transactionId);
     }
 
-    private static void deliverApprovedOrderInternal(AutoPix ap, Order order, OrderProduct legacyProduct,
-                                                       List<OrderItem> orderItems, String paymentId,
-                                                       String transactionId) {
-        if (ap == null || order == null) return;
-        Bukkit.getScheduler().runTaskAsynchronously(ap, () -> {
-            if (!claimDelivery(order.getId())) return;
-
-            refreshStatsCacheAsync(ap);
-            DiscordNotifier.notifyPaymentApproved(ap, order);
-            UUID playerUuid = getOnlinePlayerUuid(order.getPlayer());
-
-            Bukkit.getScheduler().runTask(ap, () -> {
-                try {
-                    Player p = Bukkit.getPlayerExact(order.getPlayer());
-                    String formattedPrice = String.format(Locale.ROOT, "%.2f", order.getPrice()).replace('.', ',');
-
-                    if (p != null && p.isOnline()) {
-                        try {
-                            int mapSlot = InventoryManager.findPaymentMapSlot(p);
-                            if (mapSlot >= 0) {
-                                try (InputStream successStream = ap.getResource("success.png")) {
-                                    if (successStream != null) {
-                                        BufferedImage gif = ImageIO.read(successStream);
-                                        ItemStack successMap = ImageCreator.generateMap(gif, p, null);
-                                        p.getInventory().setItem(mapSlot, successMap);
-                                    }
-                                }
-                                new BukkitRunnable() {
-                                    @Override
-                                    public void run() {
-                                        if (p.isOnline()) InventoryManager.removeUnpaidMaps(p);
-                                    }
-                                }.runTaskLater(ap, 100L);
-                            } else {
-                                InventoryManager.removeUnpaidMaps(p);
-                            }
-                        } catch (Exception exception) {
-                            ap.getLogger().warning("Nao foi possivel atualizar o mapa de pagamento de "
-                                    + p.getName() + ": " + exception.getMessage());
-                        }
-
-                        SoundManager.play(p, SoundManager.PAYMENT_APPROVED);
-                        MSG.sendTitle(p, "titulo-aprovado", "subtitulo-aprovado", 10, 70, 20,
-                                "{produto}", order.getProduct(),
-                                "{preco}", formattedPrice,
-                                "{id}", Integer.toString(order.getId()));
-                        MSG.sendActionBar(p, "actionbar-aprovado",
-                                "{produto}", order.getProduct(), "{preco}", formattedPrice);
-                        MSG.sendMessage(p, "pagamento-aprovado-chat",
-                                "{produto}", order.getProduct(),
-                                "{preco}", formattedPrice,
-                                "{id}", Integer.toString(order.getId()));
-                        InventoryManager.refreshOpenInventory(p);
-                    }
-
-                    if (orderItems != null && !orderItems.isEmpty()) {
-                        for (OrderItem item : orderItems) {
-                            for (String command : item.getCommands()) {
-                                String rendered = renderOrderCommand(command, order.getPlayer(), item);
-                                boolean dispatched = Bukkit.dispatchCommand(Bukkit.getConsoleSender(), rendered);
-                                if (!dispatched) {
-                                    throw new IllegalStateException("Comando de recompensa nao foi aceito: " + rendered);
-                                }
-                            }
-                        }
-                    } else if (legacyProduct != null && legacyProduct.getCommands() != null) {
-                        for (String command : legacyProduct.getCommands()) {
-                            String rendered = command.replace("{player}", order.getPlayer()).replace('&', '\u00a7');
-                            boolean dispatched = Bukkit.dispatchCommand(Bukkit.getConsoleSender(), rendered);
-                            if (!dispatched) {
-                                throw new IllegalStateException("Comando de recompensa nao foi aceito: " + rendered);
-                            }
-                        }
-                    }
-
-                    AutoPixEventDispatcher.dispatch(new PaymentApprovedEvent(
-                            order.getId(), order.getPlayer(),
-                            p != null ? p.getUniqueId() : playerUuid,
-                            order.getProduct(), order.getPrice(), paymentId, transactionId,
-                            orderItems));
-                    completeDeliveryAsync(ap, order.getId(), "delivered", null);
-                } catch (Exception exception) {
-                    completeDeliveryAsync(ap, order.getId(), "needs_review", exception.getMessage());
-                    ap.getLogger().severe("Entrega do pedido #" + order.getId()
-                            + " falhou ou ficou incerta. Verifique antes de repetir: " + exception.getMessage());
-                }
-            });
-        });
-    }
-
-    private static String renderOrderCommand(String command, String playerName, OrderItem item) {
-        return command.replace("{player}", playerName)
-                .replace("{produto}", item.getProduct())
-                .replace("{quantidade}", Integer.toString(item.getQuantity()))
-                .replace("{preco}", String.format(Locale.ROOT, "%.2f", item.getLineTotal()).replace('.', ','))
-                .replace('&', '\u00a7');
+    private static void deliverApprovedOrderInternal(AutoPix ap, Order order,
+                                                     List<OrderItem> orderItems, String paymentId,
+                                                     String transactionId) {
+        DeliveryManager.deliverApprovedOrder(ap, order, orderItems, paymentId, transactionId);
     }
 
     protected static void processOrderExpirations(AutoPix ap) {
+        if (!isDatabaseReady() || SHUTTING_DOWN.get()) return;
         int maxMinutes = Math.max(1, ap.getConfig().getInt("mapa.tempo-pagar", 30));
         boolean automaticMode = ap.getConfig().getBoolean("automatico.ativado", true);
 
         for (Map.Entry<String, UUID> entry : ONLINE_PLAYERS.entrySet()) {
+            if (SHUTTING_DOWN.get()) break;
             UUID playerUuid = entry.getValue();
             Order order = getLastOrderByCaseInsensitivePlayer(entry.getKey());
             if (order == null || order.isValidated()) continue;
@@ -1084,36 +1353,31 @@ public class OrderManager {
             }
 
             if (automaticMode) {
-                // Never close the local record before confirming the remote payment state.
-                // A payment can be approved between the expiration check and the cancellation request.
                 PaymentInfo currentInfo = MercadoPagoAPI.getPayment(ap, pd.getPaymentId());
                 if (currentInfo == null || currentInfo.getStatus() == null) {
-                    continue; // Keep it pending so the next cycle can reconcile with Mercado Pago.
+                    continue;
                 }
 
                 String currentStatus = currentInfo.getStatus().trim().toLowerCase(Locale.ROOT);
                 if ("approved".equals(currentStatus)) {
-                    validatePendings(ap);
+                    reconcilePixData(ap, pd);
                     continue;
                 }
 
                 if ("cancelled".equals(currentStatus) || "rejected".equals(currentStatus)) {
-                    if (setPixDataStatus(pd, currentStatus)) {
-                        handleNonApprovedStatusTransition(ap, order, pd, currentStatus, currentInfo.getPaidAmount());
-                    }
+                    reconcilePixData(ap, pd);
                     continue;
                 }
 
-                // Mercado Pago only allows cancellation from these states.
                 if (!"pending".equals(currentStatus)
                         && !"in_process".equals(currentStatus)
                         && !"authorized".equals(currentStatus)) {
-                    continue; // Unknown/non-cancellable state: do not invent a local cancellation.
+                    continue;
                 }
 
                 try {
                     if (!MercadoPagoAPI.cancelPayment(ap, pd.getPaymentId())) {
-                        continue; // Retry/reconcile later; do not hide a possibly paid transaction.
+                        continue;
                     }
                 } catch (Exception exception) {
                     ap.getLogger().warning("Erro ao cancelar pedido expirado #" + order.getId()
@@ -1121,7 +1385,6 @@ public class OrderManager {
                     continue;
                 }
 
-                // Confirm the final state after the PUT. HTTP success alone is not our source of truth.
                 PaymentInfo confirmedInfo = MercadoPagoAPI.getPayment(ap, pd.getPaymentId());
                 if (confirmedInfo == null || confirmedInfo.getStatus() == null) {
                     continue;
@@ -1129,7 +1392,7 @@ public class OrderManager {
 
                 String confirmedStatus = confirmedInfo.getStatus().trim().toLowerCase(Locale.ROOT);
                 if ("approved".equals(confirmedStatus)) {
-                    validatePendings(ap);
+                    reconcilePixData(ap, pd);
                     continue;
                 }
                 if (!"cancelled".equals(confirmedStatus)) {
@@ -1137,11 +1400,11 @@ public class OrderManager {
                 }
             }
 
-            // In automatic mode this runs only after Mercado Pago confirmed cancellation.
-            // In manual mode there is no remote payment record to cancel.
             if (!cancelPendingPixData(pd)) {
                 continue;
             }
+            updateOrderStatusIfUnpaid(order.getId(), OrderStatus.EXPIRED);
+            SubscriptionManager.onOrderPaymentFailed(order.getId(), pd.getPaymentId(), "expired");
 
             refreshStatsCacheAsync(ap);
 

@@ -1,5 +1,7 @@
 package io.github.warleysr.autopix.events;
 
+import java.math.BigDecimal;
+import java.math.RoundingMode;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
@@ -76,6 +78,14 @@ public class PaymentApprovedEvent extends Event {
 
     public double getAmount() {
         return amount;
+    }
+
+    public double getPrice() {
+        return amount;
+    }
+
+    public BigDecimal getPriceDecimal() {
+        return BigDecimal.valueOf(amount).setScale(2, RoundingMode.HALF_UP);
     }
 
     public String getPaymentId() {

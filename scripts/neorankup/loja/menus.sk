@@ -1,0 +1,36 @@
+import:
+    io.github.warleysr.autopix.api.AutoPixAPI
+    io.github.warleysr.autopix.cart.CartManager
+    io.github.warleysr.autopix.catalog.CatalogManager
+    org.bukkit.entity.Player
+
+function abrirMenuPrincipal(p: player):
+    if {_p} is not online:
+        stop
+    set {_uuid} to {_p}.getUniqueId()
+    set {_cart} to CartManager.getCart({_uuid})
+    set {_itensQtd} to {_cart}.getItemCount()
+    set {_total} to {_cart}.getTotal()
+    create a gui with virtual chest inventory with 5 rows named "&8Loja Oficial &0NeoRankUP":
+        set {_borda::*} to 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 17, 18, 26, 27, 35, 36, 44, 37, 38, 39, 41, 42, 43
+        loop {_borda::*}:
+            format gui slot loop-value with black stained glass pane named " "
+        format gui slot 11 with rose bush named "&d&lDoações & Servidor" with lore "", "&7Contribua diretamente com o servidor", "&7e receba recompensas de apoiador!", "", "&e» Clique para visualizar":
+            abrirMenuCategoria({_p}, "donations")
+        format gui slot 13 with nether star named "&6&lPlanos VIPs" with lore "", "&7Adquira planos VIP permanentes", "&7ou assinaturas mensais recorrentes!", "", "&fPlanos: &bVIP&7, &aVIP+&7, &6MVP&7, &bMVP+&7, &cSMVP++", "", "&e» Clique para visualizar":
+            abrirMenuCategoria({_p}, "vips")
+        format gui slot 15 with gold ingot named "&e&lEconomia & Moedas" with lore "", "&7Pacotes de dinheiro para turbinar", "&7sua evolução no RankUP!", "", "&e» Clique para visualizar":
+            abrirMenuCategoria({_p}, "money")
+        format gui slot 29 with emerald named "&a&lGemas Especiais" with lore "", "&7Moeda premium para comprar cosméticos,", "&7boosters e itens raros na loja!", "", "&e» Clique para visualizar":
+            abrirMenuCategoria({_p}, "gems")
+        format gui slot 31 with sunflower named "&6&lMoedas de Evento" with lore "", "&7Participe dos eventos temáticos", "&7e adquira itens sazonais exclusivos!", "", "&e» Clique para visualizar":
+            abrirMenuCategoria({_p}, "event_coins")
+        format gui slot 33 with prismarine crystals named "&b&lEstrelas Cósmicas" with lore "", "&7Moeda sagrada para desbloquear", "&7encantamentos místicos e prestígios!", "", "&e» Clique para visualizar":
+            abrirMenuCategoria({_p}, "stars")
+        format gui slot 40 with chest named "&a&lMeu Carrinho" with lore "", "&7Itens no carrinho: &f%{_itensQtd}%", "&7Total estimado: &aR$ %{_total}%", "", "&e» Clique para abrir o carrinho":
+            abrirMenuCarrinho({_p})
+        format gui slot 48 with clock named "&e&lMinhas Assinaturas" with lore "", "&7Consulte ou gerencie suas", "&7assinaturas recorrentes ativas.", "", "&e» Clique para visualizar":
+            abrirMenuAssinaturas({_p})
+        format gui slot 50 with barrier named "&c&lFechar":
+            close {_p}'s inventory
+    open the last gui to {_p}

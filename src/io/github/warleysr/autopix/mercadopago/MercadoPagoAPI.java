@@ -11,7 +11,6 @@ import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.util.UUID;
 
-import org.bukkit.Bukkit;
 import org.bukkit.entity.Player;
 import org.json.simple.JSONObject;
 import org.json.simple.parser.JSONParser;
@@ -25,9 +24,45 @@ public class MercadoPagoAPI {
 
     private static final String API_URL = "https://api.mercadopago.com/v1/payments";
 
+    @FunctionalInterface
+    public interface PaymentLookupProvider {
+        PaymentInfo getPayment(AutoPix ap, String paymentId) throws Exception;
+    }
+
+    @FunctionalInterface
+    public interface PaymentCreationProvider {
+        PixData createPayment(AutoPix ap, String playerName, String productName, BigDecimal price,
+                              String externalReference, String idempotencyKey) throws Exception;
+    }
+
+    private static volatile PaymentLookupProvider lookupOverride;
+    private static volatile PaymentCreationProvider creationOverride;
+
+    public static void setPaymentLookupOverride(PaymentLookupProvider provider) {
+        lookupOverride = provider;
+    }
+
+    public static void setPaymentCreationOverride(PaymentCreationProvider provider) {
+        creationOverride = provider;
+    }
+
+    public static void clearTestOverrides() {
+        lookupOverride = null;
+        creationOverride = null;
+    }
+
     @SuppressWarnings("unchecked")
     public static String buildCreatePaymentJson(String playerName, String productName,
                                                 float price, String notificationUrl) {
+        BigDecimal roundedPrice = BigDecimal.valueOf(Double.parseDouble(Float.toString(price)))
+                .setScale(2, RoundingMode.HALF_UP);
+        return buildCreatePaymentJson(playerName, productName, roundedPrice, playerName, notificationUrl);
+    }
+
+    @SuppressWarnings("unchecked")
+    public static String buildCreatePaymentJson(String playerName, String productName,
+                                                BigDecimal price, String externalReference,
+                                                String notificationUrl) {
         JSONObject payer = new JSONObject();
         payer.put("entity_type", "individual");
         payer.put("type", "customer");
@@ -35,12 +70,16 @@ public class MercadoPagoAPI {
         if (safeUser.isEmpty()) safeUser = "player";
         payer.put("email", safeUser + "@autopix.com");
 
-        BigDecimal roundedPrice = BigDecimal.valueOf(price).setScale(2, RoundingMode.HALF_UP);
+        BigDecimal roundedPrice = price != null
+                ? price.setScale(2, RoundingMode.HALF_UP)
+                : BigDecimal.ZERO.setScale(2, RoundingMode.HALF_UP);
 
         JSONObject root = new JSONObject();
         root.put("description", productName != null ? productName : "Produto");
         root.put("payer", payer);
-        root.put("external_reference", playerName != null ? playerName : "player");
+        root.put("external_reference", externalReference != null && !externalReference.trim().isEmpty()
+                ? externalReference.trim()
+                : (playerName != null ? playerName : "player"));
         root.put("payment_method_id", "pix");
         root.put("transaction_amount", roundedPrice);
 
@@ -69,10 +108,29 @@ public class MercadoPagoAPI {
 
     public static PixData createPixPayment(AutoPix ap, String playerName, String productName,
                                            float price, String idempotencyKey) throws Exception {
-        if (ap == null || playerName == null || productName == null || productName.trim().isEmpty()
-                || !Float.isFinite(price) || price < 0.01f) return null;
+        if (!Float.isFinite(price) || price < 0.01f) return null;
+        BigDecimal bdPrice = BigDecimal.valueOf(Double.parseDouble(Float.toString(price)))
+                .setScale(2, RoundingMode.HALF_UP);
+        return createPixPayment(ap, playerName, productName, bdPrice, playerName, idempotencyKey);
+    }
+
+    public static PixData createPixPayment(AutoPix ap, String playerName, String productName,
+                                           BigDecimal price, String externalReference,
+                                           String idempotencyKey) throws Exception {
+        if (playerName == null || productName == null || productName.trim().isEmpty()
+                || price == null || price.compareTo(new BigDecimal("0.01")) < 0) {
+            return null;
+        }
+
+        PaymentCreationProvider override = creationOverride;
+        if (override != null) {
+            return override.createPayment(ap, playerName, productName,
+                    price.setScale(2, RoundingMode.HALF_UP), externalReference, idempotencyKey);
+        }
+
+        if (ap == null) return null;
         String notificationUrl = ap.getConfig().getString("automatico.notificacoes", null);
-        String jsonBody = buildCreatePaymentJson(playerName, productName, price, notificationUrl);
+        String jsonBody = buildCreatePaymentJson(playerName, productName, price, externalReference, notificationUrl);
 
         HttpURLConnection connection = (HttpURLConnection) URI.create(API_URL).toURL().openConnection();
         try {
@@ -129,6 +187,20 @@ public class MercadoPagoAPI {
 
     public static PaymentInfo getPayment(AutoPix ap, String id) {
         if (id == null || id.trim().isEmpty()) return null;
+
+        PaymentLookupProvider override = lookupOverride;
+        if (override != null) {
+            try {
+                return override.getPayment(ap, id.trim());
+            } catch (Exception ex) {
+                if (ap != null) {
+                    ap.getLogger().warning("Erro ao consultar pagamento #" + id + " no provedor: " + ex.getMessage());
+                }
+                return null;
+            }
+        }
+
+        if (ap == null) return null;
         HttpURLConnection connection = null;
         try {
             int intervalMs = Math.max(2000, ap.getConfig().getInt("automatico.intervalo", 10) * 1000 - 500);
@@ -167,13 +239,16 @@ public class MercadoPagoAPI {
         String status = String.valueOf(statusObj);
 
         String pixId = null;
-        double paid = 0.0;
+        BigDecimal paid = BigDecimal.ZERO.setScale(2, RoundingMode.HALF_UP);
 
         JSONObject details = (JSONObject) json.get("transaction_details");
         if (details != null) {
             Object paidObj = details.get("total_paid_amount");
-            if (paidObj instanceof Number) {
-                paid = ((Number) paidObj).doubleValue();
+            if (paidObj != null) {
+                try {
+                    paid = new BigDecimal(String.valueOf(paidObj)).setScale(2, RoundingMode.HALF_UP);
+                } catch (NumberFormatException ignored) {
+                }
             }
             Object rawTxId = details.get("transaction_id");
             if (rawTxId != null) {
@@ -186,11 +261,26 @@ public class MercadoPagoAPI {
             }
         }
 
-        if (paid <= 0.0) {
+        if (paid.compareTo(BigDecimal.ZERO) <= 0) {
             Object amountObj = json.get("transaction_amount");
-            if (amountObj instanceof Number) {
-                paid = ((Number) amountObj).doubleValue();
+            if (amountObj != null) {
+                try {
+                    paid = new BigDecimal(String.valueOf(amountObj)).setScale(2, RoundingMode.HALF_UP);
+                } catch (NumberFormatException ignored) {
+                }
             }
+        }
+
+        String currencyId = "BRL";
+        Object curObj = json.get("currency_id");
+        if (curObj != null && !String.valueOf(curObj).trim().isEmpty()) {
+            currencyId = String.valueOf(curObj).trim().toUpperCase();
+        }
+
+        String externalReference = null;
+        Object extRefObj = json.get("external_reference");
+        if (extRefObj != null && !String.valueOf(extRefObj).trim().isEmpty()) {
+            externalReference = String.valueOf(extRefObj).trim();
         }
 
         if ("approved".equalsIgnoreCase(status) && (pixId == null || pixId.isEmpty())) {
@@ -199,11 +289,12 @@ public class MercadoPagoAPI {
             }
         }
 
-        return new PaymentInfo(pixId, status, paid);
+        return new PaymentInfo(paymentId, pixId, status, paid, currencyId, externalReference);
     }
 
     public static boolean cancelPayment(AutoPix ap, String paymentId) throws Exception {
         if (paymentId == null || paymentId.trim().isEmpty()) return false;
+        if (ap == null) return false;
 
         String jsonBody = "{\"status\":\"cancelled\"}";
         HttpURLConnection connection = (HttpURLConnection) URI.create(API_URL + "/" + paymentId.trim()).toURL().openConnection();

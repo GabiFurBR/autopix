@@ -411,6 +411,8 @@ public class InventoryListener implements Listener {
     public void onJoin(PlayerJoinEvent e) {
         final Player p = e.getPlayer();
         OrderManager.markPlayerOnline(p.getName(), p.getUniqueId());
+        CartManager.preloadCartAsync(p.getUniqueId());
+        io.github.warleysr.autopix.delivery.DeliveryManager.processPendingDeliveries(p);
 
         final AutoPix plugin = AutoPix.getInstance();
         if (plugin == null) return;
@@ -418,9 +420,14 @@ public class InventoryListener implements Listener {
         new BukkitRunnable() {
             @Override
             public void run() {
+                if (!OrderManager.isDatabaseReady() || OrderManager.isShuttingDown()) {
+                    return;
+                }
                 Order order = OrderManager.getLastOrder(p.getName());
                 if (order == null) {
-                    InventoryManager.removeUnpaidMaps(p);
+                    Bukkit.getScheduler().runTask(plugin, () -> {
+                        if (p.isOnline()) InventoryManager.removeUnpaidMaps(p);
+                    });
                     return;
                 }
 
@@ -429,7 +436,9 @@ public class InventoryListener implements Listener {
                         Math.max(0L, System.currentTimeMillis() - order.getCreated().getTime()));
 
                 if (order.isValidated() || elapsedMinutes >= maxMinutes) {
-                    InventoryManager.removeUnpaidMaps(p);
+                    Bukkit.getScheduler().runTask(plugin, () -> {
+                        if (p.isOnline()) InventoryManager.removeUnpaidMaps(p);
+                    });
                     return;
                 }
 
@@ -442,7 +451,9 @@ public class InventoryListener implements Listener {
 
                 PixData pd = OrderManager.getPixData(order);
                 if (pd == null || !pd.isPending()) {
-                    InventoryManager.removeUnpaidMaps(p);
+                    Bukkit.getScheduler().runTask(plugin, () -> {
+                        if (p.isOnline()) InventoryManager.removeUnpaidMaps(p);
+                    });
                     return;
                 }
 

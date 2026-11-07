@@ -1,6 +1,7 @@
 package io.github.warleysr.autopix;
 
 import java.sql.SQLException;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import org.bukkit.Bukkit;
 import org.bukkit.command.PluginCommand;
@@ -9,22 +10,27 @@ import org.bukkit.scheduler.BukkitRunnable;
 import org.bukkit.scheduler.BukkitTask;
 
 import io.github.warleysr.autopix.cart.CartManager;
+import io.github.warleysr.autopix.catalog.CatalogManager;
 import io.github.warleysr.autopix.commands.APMenuCommand;
 import io.github.warleysr.autopix.commands.AutoPixCommand;
 import io.github.warleysr.autopix.expansion.AutoPixExpansion;
 import io.github.warleysr.autopix.inventory.InventoryListener;
 import io.github.warleysr.autopix.inventory.InventoryManager;
+import io.github.warleysr.autopix.mercadopago.WebhookHttpServer;
+import io.github.warleysr.autopix.subscription.SubscriptionManager;
 
 public class AutoPix extends JavaPlugin {
 
     private static String PIX_KEY;
     private static String PIX_NAME;
-    private static BukkitTask VALIDATE_TASK, MAPS_TASK, HOLOGRAM_TASK;
+    private static BukkitTask VALIDATE_TASK, MAPS_TASK, HOLOGRAM_TASK, SUBSCRIPTION_TASK;
     private static AutoPix instance;
+    private static final AtomicBoolean INITIAL_RECOVERY_DONE = new AtomicBoolean(false);
 
     @Override
     public void onEnable() {
         instance = this;
+        INITIAL_RECOVERY_DONE.set(false);
         saveDefaultConfig();
         if (!reloadPlugin()) return;
 
@@ -45,19 +51,21 @@ public class AutoPix extends JavaPlugin {
         if (Bukkit.getPluginManager().isPluginEnabled("PlaceholderAPI")) {
             new AutoPixExpansion().register();
         }
-
-        // Run crash recovery only once per plugin enable, never on /autopix reload.
-        OrderManager.recoverPendingDeliveries(this);
     }
 
     @Override
     public void onDisable() {
+        OrderManager.setShuttingDown(true);
+        OrderManager.setDatabaseReady(false);
+        WebhookHttpServer.stop();
         cancelTask(VALIDATE_TASK);
         cancelTask(MAPS_TASK);
         cancelTask(HOLOGRAM_TASK);
+        cancelTask(SUBSCRIPTION_TASK);
         VALIDATE_TASK = null;
         MAPS_TASK = null;
         HOLOGRAM_TASK = null;
+        SUBSCRIPTION_TASK = null;
         CartManager.clearAll();
         OrderManager.shutdown();
         instance = null;
@@ -81,6 +89,7 @@ public class AutoPix extends JavaPlugin {
 
     public static boolean reloadPlugin() {
         AutoPix plugin = getInstance();
+        if (plugin == null) return false;
         plugin.reloadConfig();
 
         PIX_KEY = plugin.getConfig().getString("pix.chave");
@@ -88,21 +97,47 @@ public class AutoPix extends JavaPlugin {
         MSG.loadMessages(plugin);
         SoundManager.loadSounds(plugin);
         OrderManager.syncOnlinePlayersFromServer();
+        InventoryManager.createMenuInventory(plugin);
+        CatalogManager.load(plugin);
 
-        try {
-            if (!OrderManager.startOrderManager(plugin)) {
-                plugin.setEnabled(false);
-                return false;
+        OrderManager.setDatabaseReady(false);
+
+        Runnable dbInitTask = () -> {
+            try {
+                if (!OrderManager.startOrderManager(plugin)) {
+                    Bukkit.getScheduler().runTask(plugin, () -> plugin.setEnabled(false));
+                    return;
+                }
+            } catch (SQLException exception) {
+                Bukkit.getScheduler().runTask(plugin, () -> {
+                    Bukkit.getConsoleSender().sendMessage(MSG.getMessage("erro-sql")
+                            .replace("{mensagem}", exception.getMessage()));
+                    plugin.setEnabled(false);
+                });
+                return;
             }
-        } catch (SQLException exception) {
-            Bukkit.getConsoleSender().sendMessage(MSG.getMessage("erro-sql")
-                    .replace("{mensagem}", exception.getMessage()));
-            plugin.setEnabled(false);
-            return false;
+
+            if (INITIAL_RECOVERY_DONE.compareAndSet(false, true)) {
+                OrderManager.recoverPendingDeliveries(plugin);
+            }
+
+            Bukkit.getScheduler().runTask(plugin, () -> {
+                if (!plugin.isEnabled()) return;
+                WebhookHttpServer.start(plugin);
+                scheduleBackgroundTasks(plugin);
+            });
+        };
+
+        if (Bukkit.getServer() != null && Bukkit.isPrimaryThread()) {
+            Bukkit.getScheduler().runTaskAsynchronously(plugin, dbInitTask);
+        } else {
+            dbInitTask.run();
         }
 
-        InventoryManager.createMenuInventory(plugin);
+        return true;
+    }
 
+    private static void scheduleBackgroundTasks(AutoPix plugin) {
         if (plugin.getConfig().getBoolean("automatico.ativado")) {
             cancelTask(VALIDATE_TASK);
             int interval = Math.max(5, plugin.getConfig().getInt("automatico.intervalo", 10));
@@ -136,6 +171,14 @@ public class AutoPix extends JavaPlugin {
             }
         }.runTaskTimerAsynchronously(plugin, 0L, holoInterval * 20L);
 
-        return true;
+        cancelTask(SUBSCRIPTION_TASK);
+        SUBSCRIPTION_TASK = new BukkitRunnable() {
+            @Override
+            public void run() {
+                if (OrderManager.isDatabaseReady() && !OrderManager.isShuttingDown()) {
+                    SubscriptionManager.processDueSubscriptions();
+                }
+            }
+        }.runTaskTimerAsynchronously(plugin, 600L, 1200L);
     }
 }

@@ -1,0 +1,479 @@
+catalog:
+  version: 1
+
+  custom_donation:
+    enabled: true
+    minimum: 1.00
+    maximum: 1000.00
+    allow_decimal: true
+    reward: null
+
+  categories:
+    donations:
+      enabled: true
+      name: "Doações"
+      products:
+        - donation_150
+        - donation_500
+        - donation_1000
+        - donation_2000
+        - donation_3000
+        - donation_5000
+        - donation_10000
+
+    vips:
+      enabled: true
+      name: "VIPs"
+      products:
+        - vip
+        - vip_plus
+        - vip_double_plus
+        - mvp
+        - mvp_plus
+        - mvp_double_plus
+        - svp
+        - svp_plus
+        - svp_double_plus
+        - smvp
+        - smvp_plus
+        - smvp_double_plus
+
+    money:
+      enabled: true
+      name: "Dinheiro"
+      products:
+        - money_10m
+        - money_50m
+        - money_100m
+
+    gems:
+      enabled: true
+      name: "Gemas"
+      products:
+        - gems_5k
+        - gems_25k
+        - gems_100k
+
+    event_coins:
+      enabled: true
+      name: "Moedas de Evento"
+      products:
+        - event_coins_500
+        - event_coins_2500
+
+    stars:
+      enabled: true
+      name: "Estrelas"
+      products:
+        - stars_100
+        - stars_500
+
+  products:
+    # --- Doações ---
+    donation_150:
+      enabled: true
+      name: "Doação R$ 1,50"
+      category: "donations"
+      price: 1.50
+      delivery:
+        type: "autopix"
+        commands:
+          - "say &b[AutoPix] &a{player} fez uma doacao de R$ 1,50!"
+
+    donation_500:
+      enabled: true
+      name: "Doação R$ 5,00"
+      category: "donations"
+      price: 5.00
+      delivery:
+        type: "autopix"
+        commands:
+          - "say &b[AutoPix] &a{player} fez uma doacao de R$ 5,00!"
+
+    donation_1000:
+      enabled: true
+      name: "Doação R$ 10,00"
+      category: "donations"
+      price: 10.00
+      delivery:
+        type: "autopix"
+        commands:
+          - "say &b[AutoPix] &a{player} fez uma doacao de R$ 10,00!"
+
+    donation_2000:
+      enabled: true
+      name: "Doação R$ 20,00"
+      category: "donations"
+      price: 20.00
+      delivery:
+        type: "autopix"
+        commands:
+          - "say &b[AutoPix] &a{player} fez uma doacao de R$ 20,00!"
+
+    donation_3000:
+      enabled: true
+      name: "Doação R$ 30,00"
+      category: "donations"
+      price: 30.00
+      delivery:
+        type: "autopix"
+        commands:
+          - "say &b[AutoPix] &a{player} fez uma doacao de R$ 30,00!"
+
+    donation_5000:
+      enabled: true
+      name: "Doação R$ 50,00"
+      category: "donations"
+      price: 50.00
+      delivery:
+        type: "autopix"
+        commands:
+          - "say &b[AutoPix] &a{player} fez uma doacao de R$ 50,00!"
+
+    donation_10000:
+      enabled: true
+      name: "Doação R$ 100,00"
+      category: "donations"
+      price: 100.00
+      delivery:
+        type: "autopix"
+        commands:
+          - "say &b[AutoPix] &a{player} fez uma doacao de R$ 100,00!"
+
+    # --- VIPs ---
+    vip:
+      enabled: true
+      name: "VIP"
+      category: "vips"
+      offers:
+        weekly:
+          type: "one_time"
+          duration: "7d"
+          price: 1.99
+        monthly:
+          type: "one_time"
+          duration: "30d"
+          price: 4.99
+        quarterly:
+          type: "one_time"
+          duration: "90d"
+          price: 11.99
+        subscription_monthly:
+          type: "subscription"
+          duration: "30d"
+          price: 4.49
+      delivery:
+        type: "autopix"
+        commands:
+          - "lp user {player} parent addtemp vip 30d"
+
+    vip_plus:
+      enabled: true
+      name: "VIP+"
+      category: "vips"
+      offers:
+        weekly:
+          type: "one_time"
+          duration: "7d"
+          price: 2.99
+        monthly:
+          type: "one_time"
+          duration: "30d"
+          price: 7.99
+        quarterly:
+          type: "one_time"
+          duration: "90d"
+          price: 18.99
+      delivery:
+        type: "autopix"
+        commands:
+          - "lp user {player} parent addtemp vip_plus 30d"
+
+    vip_double_plus:
+      enabled: true
+      name: "VIP++"
+      category: "vips"
+      offers:
+        weekly:
+          type: "one_time"
+          duration: "7d"
+          price: 3.99
+        monthly:
+          type: "one_time"
+          duration: "30d"
+          price: 10.99
+        quarterly:
+          type: "one_time"
+          duration: "90d"
+          price: 26.99
+      delivery:
+        type: "autopix"
+        commands:
+          - "lp user {player} parent addtemp vip_double_plus 30d"
+
+    mvp:
+      enabled: true
+      name: "MVP"
+      category: "vips"
+      offers:
+        monthly:
+          type: "one_time"
+          duration: "30d"
+          price: 14.99
+        quarterly:
+          type: "one_time"
+          duration: "90d"
+          price: 35.99
+      delivery:
+        type: "autopix"
+        commands:
+          - "lp user {player} parent addtemp mvp 30d"
+
+    mvp_plus:
+      enabled: true
+      name: "MVP+"
+      category: "vips"
+      offers:
+        monthly:
+          type: "one_time"
+          duration: "30d"
+          price: 18.99
+        quarterly:
+          type: "one_time"
+          duration: "90d"
+          price: 45.99
+      delivery:
+        type: "autopix"
+        commands:
+          - "lp user {player} parent addtemp mvp_plus 30d"
+
+    mvp_double_plus:
+      enabled: true
+      name: "MVP++"
+      category: "vips"
+      offers:
+        monthly:
+          type: "one_time"
+          duration: "30d"
+          price: 22.99
+        quarterly:
+          type: "one_time"
+          duration: "90d"
+          price: 54.99
+      delivery:
+        type: "autopix"
+        commands:
+          - "lp user {player} parent addtemp mvp_double_plus 30d"
+
+    svp:
+      enabled: true
+      name: "SVP"
+      category: "vips"
+      offers:
+        monthly:
+          type: "one_time"
+          duration: "30d"
+          price: 29.99
+        quarterly:
+          type: "one_time"
+          duration: "90d"
+          price: 69.99
+      delivery:
+        type: "autopix"
+        commands:
+          - "lp user {player} parent addtemp svp 30d"
+
+    svp_plus:
+      enabled: true
+      name: "SVP+"
+      category: "vips"
+      offers:
+        monthly:
+          type: "one_time"
+          duration: "30d"
+          price: 34.99
+        quarterly:
+          type: "one_time"
+          duration: "90d"
+          price: 84.99
+      delivery:
+        type: "autopix"
+        commands:
+          - "lp user {player} parent addtemp svp_plus 30d"
+
+    svp_double_plus:
+      enabled: true
+      name: "SVP++"
+      category: "vips"
+      offers:
+        monthly:
+          type: "one_time"
+          duration: "30d"
+          price: 39.99
+        quarterly:
+          type: "one_time"
+          duration: "90d"
+          price: 94.99
+      delivery:
+        type: "autopix"
+        commands:
+          - "lp user {player} parent addtemp svp_double_plus 30d"
+
+    smvp:
+      enabled: true
+      name: "SMVP"
+      category: "vips"
+      offers:
+        monthly:
+          type: "one_time"
+          duration: "30d"
+          price: 49.99
+        quarterly:
+          type: "one_time"
+          duration: "90d"
+          price: 119.99
+      delivery:
+        type: "autopix"
+        commands:
+          - "lp user {player} parent addtemp smvp 30d"
+
+    smvp_plus:
+      enabled: true
+      name: "SMVP+"
+      category: "vips"
+      offers:
+        monthly:
+          type: "one_time"
+          duration: "30d"
+          price: 59.99
+        quarterly:
+          type: "one_time"
+          duration: "90d"
+          price: 139.99
+      delivery:
+        type: "autopix"
+        commands:
+          - "lp user {player} parent addtemp smvp_plus 30d"
+
+    smvp_double_plus:
+      enabled: true
+      name: "SMVP++"
+      category: "vips"
+      offers:
+        monthly:
+          type: "one_time"
+          duration: "30d"
+          price: 69.99
+        quarterly:
+          type: "one_time"
+          duration: "90d"
+          price: 169.99
+      delivery:
+        type: "autopix"
+        commands:
+          - "lp user {player} parent addtemp smvp_double_plus 30d"
+
+    # --- Dinheiro ---
+    money_10m:
+      enabled: true
+      name: "$10.000.000"
+      category: "money"
+      price: 9.99
+      delivery:
+        type: "autopix"
+        commands:
+          - "eco give {player} 10000000"
+
+    money_50m:
+      enabled: true
+      name: "$50.000.000"
+      category: "money"
+      price: 39.99
+      delivery:
+        type: "autopix"
+        commands:
+          - "eco give {player} 50000000"
+
+    money_100m:
+      enabled: true
+      name: "$100.000.000"
+      category: "money"
+      price: 69.99
+      delivery:
+        type: "autopix"
+        commands:
+          - "eco give {player} 100000000"
+
+    # --- Gemas ---
+    gems_5k:
+      enabled: true
+      name: "5.000 Gemas"
+      category: "gems"
+      price: 7.99
+      delivery:
+        type: "skript"
+        handler: "gems_purchase"
+
+    gems_25k:
+      enabled: true
+      name: "25.000 Gemas"
+      category: "gems"
+      price: 29.99
+      delivery:
+        type: "skript"
+        handler: "gems_purchase"
+
+    gems_100k:
+      enabled: true
+      name: "100.000 Gemas"
+      category: "gems"
+      price: 99.99
+      delivery:
+        type: "skript"
+        handler: "gems_purchase"
+
+    # --- Moedas de Evento ---
+    event_coins_500:
+      enabled: true
+      name: "500 Moedas de Evento"
+      category: "event_coins"
+      price: 4.99
+      delivery:
+        type: "hybrid"
+        autopix:
+          commands:
+            - "say &b[AutoPix] &a{player} adquiriu Moedas de Evento!"
+        skript:
+          handler: "event_coins_purchase"
+
+    event_coins_2500:
+      enabled: true
+      name: "2.500 Moedas de Evento"
+      category: "event_coins"
+      price: 19.99
+      delivery:
+        type: "hybrid"
+        autopix:
+          commands:
+            - "say &b[AutoPix] &a{player} adquiriu Moedas de Evento!"
+        skript:
+          handler: "event_coins_purchase"
+
+    # --- Estrelas ---
+    stars_100:
+      enabled: true
+      name: "100 Estrelas"
+      category: "stars"
+      price: 6.99
+      delivery:
+        type: "skript"
+        handler: "stars_purchase"
+
+    stars_500:
+      enabled: true
+      name: "500 Estrelas"
+      category: "stars"
+      price: 24.99
+      delivery:
+        type: "skript"
+        handler: "stars_purchase"

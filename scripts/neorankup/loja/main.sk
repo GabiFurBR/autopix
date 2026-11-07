@@ -1,0 +1,74 @@
+import:
+    io.github.warleysr.autopix.api.AutoPixAPI
+    io.github.warleysr.autopix.cart.CartManager
+    io.github.warleysr.autopix.catalog.CatalogManager
+    io.github.warleysr.autopix.subscription.SubscriptionManager
+    org.bukkit.entity.Player
+
+command /loja [<text>]:
+    aliases: /shop, /mercado
+    trigger:
+        if arg-1 is not set:
+            abrirMenuPrincipal(player)
+            stop
+        if arg-1 is "carrinho" or "cart":
+            abrirMenuCarrinho(player)
+            stop
+        if arg-1 is "assinaturas" or "subs":
+            abrirMenuAssinaturas(player)
+            stop
+        if arg-1 is "vip" or "vips":
+            abrirMenuCategoria(player, "vips")
+            stop
+        if arg-1 is "doacoes" or "doar":
+            abrirMenuCategoria(player, "donations")
+            stop
+        if arg-1 is "dinheiro" or "money":
+            abrirMenuCategoria(player, "money")
+            stop
+        if arg-1 is "gemas" or "gems":
+            abrirMenuCategoria(player, "gems")
+            stop
+        if arg-1 is "moedas" or "event_coins":
+            abrirMenuCategoria(player, "event_coins")
+            stop
+        if arg-1 is "estrelas" or "stars":
+            abrirMenuCategoria(player, "stars")
+            stop
+        abrirMenuCategoria(player, arg-1)
+
+command /carrinho [<text>] [<text>]:
+    aliases: /cart
+    trigger:
+        if arg-1 is not set:
+            abrirMenuCarrinho(player)
+            stop
+        if arg-1 is "limpar" or "clear":
+            set {_uuid} to player.getUniqueId()
+            set {_future} to AutoPixAPI.clearCart({_uuid})
+            {_future}.thenAccept({_res} -> handleClearCartCmd(player, {_res}))
+            stop
+        if arg-1 is "cupom":
+            if arg-2 is not set:
+                lojaErro(player, "Uso correto: &b/carrinho cupom <código>")
+                stop
+            set {_uuid} to player.getUniqueId()
+            set {_future} to AutoPixAPI.applyCoupon({_uuid}, arg-2)
+            {_future}.thenAccept({_res} -> handleCouponCmd(player, {_res}))
+            stop
+
+function handleClearCartCmd(p: player, res: object):
+    if {_p} is online:
+        lojaSucesso({_p}, "Seu carrinho foi esvaziado!")
+
+function handleCouponCmd(p: player, res: object):
+    if {_p} is online:
+        if {_res}.isSuccessful() is true:
+            lojaSucesso({_p}, "%{_res}.getMessage()%")
+        else:
+            lojaErro({_p}, "%{_res}.getMessage()%")
+
+command /assinaturas:
+    aliases: /subs, /minhasassinaturas
+    trigger:
+        abrirMenuAssinaturas(player)

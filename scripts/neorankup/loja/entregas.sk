@@ -1,0 +1,57 @@
+import:
+    io.github.warleysr.autopix.events.PaymentApprovedEvent
+    io.github.warleysr.autopix.events.DeliveryStartedEvent
+    io.github.warleysr.autopix.events.DeliveryCompletedEvent
+    io.github.warleysr.autopix.events.DeliveryFailedEvent
+    io.github.warleysr.autopix.events.DeliveryNeedsReviewEvent
+    org.bukkit.entity.Player
+    org.bukkit.Bukkit
+
+on "io.github.warleysr.autopix.events.PaymentApprovedEvent":
+    set {_p} to event.getPlayer()
+    set {_nome} to event.getPlayerName()
+    set {_produto} to event.getProduct()
+    set {_preco} to event.getPrice()
+    set {_orderId} to event.getOrderId()
+    broadcast ""
+    broadcast "&6&l[LOJA] &fO jogador &b&l%{_nome}% &fadquiriu &e&l%{_produto}% &fna loja!"
+    broadcast "&7Agradecemos pelo apoio ao servidor! Use &b/loja &7para contribuir."
+    broadcast ""
+    if {_p} is set:
+        if {_p}.isOnline() is true:
+            play sound "ui.toast.challenge_complete" with volume 1 and pitch 1 to {_p}
+            send title "&a&lPAGAMENTO APROVADO!" with subtitle "&fObrigado pelo seu apoio, &e%{_nome}%&f!" to {_p} for 4 seconds
+
+on "io.github.warleysr.autopix.events.DeliveryStartedEvent":
+    set {_handler} to event.getHandler()
+    set {_deliveryType} to event.getDeliveryType()
+    set {_p} to event.getPlayer()
+    set {_orderId} to event.getOrderId()
+    if {_deliveryType} is "skript" or "hybrid":
+        if {_p} is set:
+            if {_p}.isOnline() is true:
+                lojaSucesso({_p}, "Processando benefícios exclusivos da sua compra (%{_handler}%)...")
+
+on "io.github.warleysr.autopix.events.DeliveryCompletedEvent":
+    set {_p} to event.getPlayer()
+    if {_p} is set:
+        if {_p}.isOnline() is true:
+            lojaSucesso({_p}, "Todos os benefícios do pedido #%event.getOrderId()% foram entregues com sucesso!")
+
+on "io.github.warleysr.autopix.events.DeliveryFailedEvent":
+    set {_orderId} to event.getOrderId()
+    set {_reason} to event.getReason()
+    loop all players:
+        if loop-player has permission "autopix.admin":
+            send "&c&l[ALERTA AUTOPIX] &fFalha na entrega do pedido &e#%{_orderId}%&f: %{_reason}%" to loop-player
+
+on "io.github.warleysr.autopix.events.DeliveryNeedsReviewEvent":
+    set {_orderId} to event.getOrderId()
+    set {_reason} to event.getReason()
+    loop all players:
+        if loop-player has permission "autopix.admin":
+            send "" to loop-player
+            send "&c&l[ALERTA AUTOPIX] &fA entrega do pedido &e#%{_orderId}% &fexige revisão manual!" to loop-player
+            send "&7Motivo: &f%{_reason}%" to loop-player
+            send "&7Use &b/pix historico &7para inspecionar." to loop-player
+            send "" to loop-player

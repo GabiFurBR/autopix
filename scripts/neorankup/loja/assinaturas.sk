@@ -1,0 +1,95 @@
+import:
+    io.github.warleysr.autopix.api.AutoPixAPI
+    io.github.warleysr.autopix.api.Subscription
+    io.github.warleysr.autopix.api.SubscriptionStatus
+    io.github.warleysr.autopix.subscription.SubscriptionManager
+    org.bukkit.entity.Player
+
+function abrirMenuAssinaturas(p: player):
+    if {_p} is not online:
+        stop
+    set {_uuid} to {_p}.getUniqueId()
+    set {_future} to AutoPixAPI.getPlayerSubscriptions({_uuid})
+    {_future}.thenAccept({_subs} -> renderMenuAssinaturas({_p}, {_subs}))
+
+function renderMenuAssinaturas(p: player, subs: object):
+    if {_p} is not online:
+        stop
+    create a gui with virtual chest inventory with 5 rows named "&8Minhas Assinaturas &0NeoRankUP":
+        set {_borda::*} to 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 17, 18, 26, 27, 35, 36, 37, 38, 39, 41, 42, 43, 44
+        loop {_borda::*}:
+            format gui slot loop-value with black stained glass pane named " "
+        if size of ...{_subs} is 0:
+            format gui slot 22 with clock named "&e&lNenhuma Assinatura Encontrada" with lore "", "&7Você não possui assinaturas registradas.", "&7Assine planos VIPs mensais na categoria VIPs!", "", "&e» Clique para ver planos VIP":
+                abrirMenuCategoria({_p}, "vips")
+        else:
+            set {_slots::*} to 10, 11, 12, 13, 14, 15, 16, 19, 20, 21, 22, 23, 24, 25
+            set {_idx} to 1
+            loop ...{_subs}:
+                set {_sub} to loop-value
+                set {_slot} to {_slots::%{_idx}%}
+                if {_slot} is set:
+                    set {_subId} to {_sub}.getId()
+                    set {_prod} to {_sub}.getProductId()
+                    set {_status} to {_sub}.getStatus().name()
+                    set {_valor} to {_sub}.getAmount()
+                    set {_freq} to {_sub}.getFrequency()
+                    set {_statusFormatado} to formatarStatus({_status})
+                    format gui slot {_slot} with nether star named "&6&lAssinatura: &f%{_prod}%" with lore "", "&7ID: &8%{_subId}%", "&7Valor: &aR$ %{_valor}% &8(%{_freq}%)", "&7Status: %{_statusFormatado}%", "", "&c» Clique para Cancelar Assinatura":
+                        set {_cancelFuture} to AutoPixAPI.cancelSubscription({_subId}, false)
+                        {_cancelFuture}.thenAccept({_res} -> handleCancelSubscriptionUi({_p}, {_res}))
+                    add 1 to {_idx}
+        format gui slot 40 with arrow named "&c&l« Voltar ao Menu Principal":
+            abrirMenuPrincipal({_p})
+    open the last gui to {_p}
+
+function handleSubscriptionCheckoutResult(p: player, res: object):
+    if {_p} is online:
+        if {_res}.isSuccessful() is true:
+            set {_order} to {_res}.getOrder()
+            set {_payment} to {_res}.getPayment()
+            if {_order} is set:
+                if {_payment} is set:
+                    exibirTelaPagamento({_p}, {_order}, {_payment})
+                    stop
+            lojaSucesso({_p}, "%{_res}.getMessage()%")
+        else:
+            lojaErro({_p}, "%{_res}.getMessage()%")
+
+function handleCancelSubscriptionUi(p: player, res: object):
+    if {_p} is online:
+        if {_res}.isSuccessful() is true:
+            lojaSucesso({_p}, "Assinatura cancelada com sucesso.")
+        else:
+            lojaErro({_p}, "%{_res}.getMessage()%")
+        abrirMenuAssinaturas({_p})
+
+on "io.github.warleysr.autopix.events.SubscriptionCreatedEvent":
+    set {_subId} to event.getSubscriptionId()
+    set {_p} to event.getPlayer()
+    if {_p} is set:
+        if {_p}.isOnline() is true:
+            lojaAviso({_p}, "Assinatura &b%{_subId}% &fcriada! Efetue o pagamento PIX para ativá-la.")
+
+on "io.github.warleysr.autopix.events.SubscriptionRenewedEvent":
+    set {_subId} to event.getSubscriptionId()
+    set {_p} to event.getPlayer()
+    if {_p} is set:
+        if {_p}.isOnline() is true:
+            lojaSucesso({_p}, "Sua assinatura &b%{_subId}% &ffoi renovada com sucesso!")
+            play sound "ui.toast.challenge_complete" to {_p}
+
+on "io.github.warleysr.autopix.events.SubscriptionPaymentFailedEvent":
+    set {_subId} to event.getSubscriptionId()
+    set {_reason} to event.getReason()
+    set {_p} to event.getPlayer()
+    if {_p} is set:
+        if {_p}.isOnline() is true:
+            lojaErro({_p}, "Falha no pagamento da assinatura &e%{_subId}%&f: %{_reason}%")
+
+on "io.github.warleysr.autopix.events.SubscriptionCancelledEvent":
+    set {_subId} to event.getSubscriptionId()
+    set {_p} to event.getPlayer()
+    if {_p} is set:
+        if {_p}.isOnline() is true:
+            lojaAviso({_p}, "A assinatura &e%{_subId}% &ffoi cancelada.")
