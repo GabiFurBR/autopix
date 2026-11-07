@@ -1753,6 +1753,92 @@ class AutoPixAuditTest {
     }
 
     @Test
+    void testInterruptedLegacyDeliveryMigrationRecoversPartiallyCopiedBackupRows() throws Exception {
+        try (Connection conn = OrderManager.getConnection()) {
+            try (Statement stmt = conn.createStatement()) {
+                stmt.executeUpdate("CREATE TABLE autopix_deliveries_legacy_backup ("
+                        + "order_id INTEGER PRIMARY KEY, player_uuid VARCHAR(36), status VARCHAR(32), "
+                        + "delivery_type VARCHAR(32), handler VARCHAR(64), payload TEXT, attempts INTEGER, "
+                        + "updated_at TIMESTAMP, last_error TEXT);");
+            }
+
+            Timestamp now = Timestamp.from(Instant.now());
+            try (PreparedStatement insert = conn.prepareStatement(
+                    "INSERT INTO autopix_deliveries_legacy_backup "
+                            + "(order_id, player_uuid, status, delivery_type, handler, payload, attempts, updated_at, last_error) "
+                            + "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);")) {
+                insert.setInt(1, 94001);
+                insert.setString(2, UUID.randomUUID().toString());
+                insert.setString(3, "delivered");
+                insert.setString(4, "autopix");
+                insert.setString(5, "autopix");
+                insert.setString(6, "{\\"already\\":true}");
+                insert.setInt(7, 1);
+                insert.setTimestamp(8, now);
+                insert.setString(9, null);
+                insert.executeUpdate();
+
+                insert.setInt(1, 94002);
+                insert.setString(2, UUID.randomUUID().toString());
+                insert.setString(3, "pending");
+                insert.setString(4, "skript");
+                insert.setString(5, "gems_purchase");
+                insert.setString(6, "{\\"notCopied\\":true}");
+                insert.setInt(7, 0);
+                insert.setTimestamp(8, now);
+                insert.setString(9, null);
+                insert.executeUpdate();
+            }
+
+            // Simulate a crash after the replacement table was created and only the first
+            // legacy row was copied. V4 must resume from the backup without duplicating it.
+            try (PreparedStatement insertCurrent = conn.prepareStatement(
+                    "INSERT INTO autopix_deliveries "
+                            + "(delivery_id, order_id, item_index, player_uuid, status, delivery_type, handler, "
+                            + "idempotency_key, attempts, updated_at) VALUES (?, ?, 0, ?, ?, ?, ?, ?, ?, ?);")) {
+                insertCurrent.setString(1, "deliv_94001_0");
+                insertCurrent.setInt(2, 94001);
+                insertCurrent.setString(3, "00000000-0000-0000-0000-000000000001");
+                insertCurrent.setString(4, "delivered");
+                insertCurrent.setString(5, "autopix");
+                insertCurrent.setString(6, "autopix");
+                insertCurrent.setString(7, "deliv_94001_0");
+                insertCurrent.setInt(8, 1);
+                insertCurrent.setTimestamp(9, now);
+                insertCurrent.executeUpdate();
+            }
+
+            try (Statement stmt = conn.createStatement()) {
+                stmt.executeUpdate("DELETE FROM autopix_schema_migrations WHERE version = 4;");
+            }
+
+            DatabaseMigrationRunner.migrate(conn, "sqlite", "INTEGER PRIMARY KEY AUTOINCREMENT");
+
+            try (PreparedStatement query = conn.prepareStatement(
+                    "SELECT status, delivery_type, handler FROM autopix_deliveries WHERE order_id = ? AND item_index = 0;")) {
+                query.setInt(1, 94001);
+                try (ResultSet rs = query.executeQuery()) {
+                    assertTrue(rs.next());
+                    assertEquals("delivered", rs.getString("status"));
+                    assertFalse(rs.next(), "A linha ja copiada nao pode ser duplicada durante a recuperacao.");
+                }
+                query.setInt(1, 94002);
+                try (ResultSet rs = query.executeQuery()) {
+                    assertTrue(rs.next(), "A linha que faltava deve ser recuperada do backup.");
+                    assertEquals("pending", rs.getString("status"));
+                    assertEquals("skript", rs.getString("delivery_type"));
+                    assertEquals("gems_purchase", rs.getString("handler"));
+                    assertFalse(rs.next());
+                }
+            }
+
+            assertFalse(DatabaseMigrationRunner.tableExists(conn, "autopix_deliveries_legacy_backup"),
+                    "O backup so pode ser removido depois que todas as linhas forem recuperadas.");
+            assertTrue(DatabaseMigrationRunner.getAppliedVersions(conn).contains(4));
+        }
+    }
+
+    @Test
     void testFinancialCalculationsPreserveBigDecimalPrecisionAndValidateScale() throws Exception {
         // 1. PixGenerator BigDecimal precision and scale validation
         assertTrue(PixGenerator.isValidCurrencyAmount(new BigDecimal("19.99")));
