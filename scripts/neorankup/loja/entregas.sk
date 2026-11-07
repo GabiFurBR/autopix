@@ -31,7 +31,6 @@ function executarEntregaCustomLoja(p: player, handler: text, orderId: text, item
         return true
     if {_deliveryState} is set:
         return false
-
     if {_handler} is "custom_donation_reward":
         set {_donationValue} to {_orderItem}.getLineTotal()
         if {_donationValue} is not set:
@@ -46,7 +45,6 @@ function executarEntregaCustomLoja(p: player, handler: text, orderId: text, item
         lojaSucesso({_p}, "Obrigado pela doação de &aR$ %{_donationValue}%&f! Seu apoio ajuda a manter o servidor.")
         set {autopix::delivery::%{_orderId}%::%{_itemIndex}%::state} to "APPLIED"
         return true
-
     set {_unitAmount} to 0
     if {_handler} is "gems_purchase":
         if {_productId} is "gems_5k":
