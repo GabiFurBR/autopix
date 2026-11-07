@@ -1701,10 +1701,32 @@ class AutoPixAuditTest {
         // 4. If Cycle #2's PIX payment fails (rejected) and the player retries renewSubscription,
         // it reuses Cycle #2's invoice with a new PIX charge instead of creating a Cycle #3 invoice
         String cycle2PayId = playerRenewRes.getPayment().getId();
+        Timestamp graceBeforeRetry;
+        try (Connection conn = OrderManager.getConnection();
+             PreparedStatement stmt = conn.prepareStatement(
+                     "SELECT grace_until FROM autopix_subscriptions WHERE subscription_id = ?;")) {
+            stmt.setString(1, subId);
+            try (ResultSet rs = stmt.executeQuery()) {
+                assertTrue(rs.next());
+                graceBeforeRetry = rs.getTimestamp("grace_until");
+            }
+        }
+        assertNotNull(graceBeforeRetry, "A assinatura PAST_DUE deve possuir prazo de carência persistido.");
+
         providerPayments.put(cycle2PayId, new PaymentInfo(
                 cycle2PayId, null, "rejected", new BigDecimal("29.90"), "BRL", null));
         assertTrue(OrderManager.reconcilePaymentById(null, cycle2PayId));
         assertEquals("REJECTED", SubscriptionManager.getInvoice(playerRenewRes.getInvoice().getInvoiceId()).getStatus());
+        try (Connection conn = OrderManager.getConnection();
+             PreparedStatement stmt = conn.prepareStatement(
+                     "SELECT grace_until FROM autopix_subscriptions WHERE subscription_id = ?;")) {
+            stmt.setString(1, subId);
+            try (ResultSet rs = stmt.executeQuery()) {
+                assertTrue(rs.next());
+                assertEquals(graceBeforeRetry.getTime(), rs.getTimestamp("grace_until").getTime(),
+                        "Falhas de renovacao nao podem reiniciar o prazo de carencia.");
+            }
+        }
 
         SubscriptionResult retryRenewRes = SubscriptionManager.renewSubscription(subId);
         assertTrue(retryRenewRes.isSuccessful());
