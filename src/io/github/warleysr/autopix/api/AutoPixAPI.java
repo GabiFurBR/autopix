@@ -15,6 +15,7 @@ import java.util.Locale;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 
 import org.bukkit.Bukkit;
@@ -55,6 +56,7 @@ import io.github.warleysr.autopix.subscription.SubscriptionManager;
 public final class AutoPixAPI {
 
     private static volatile String webhookSecretOverride;
+    private static final ConcurrentHashMap<String, Object> WEBHOOK_PAYMENT_LOCKS = new ConcurrentHashMap<>();
 
     private AutoPixAPI() {
     }
@@ -69,6 +71,10 @@ public final class AutoPixAPI {
         }
         AutoPix plugin = AutoPix.getInstance();
         if (plugin != null && plugin.getConfig() != null) {
+            String autoSecret = plugin.getConfig().getString("automatico.webhook.secret", "");
+            if (autoSecret != null && !autoSecret.trim().isEmpty()) {
+                return autoSecret.trim();
+            }
             String cfgSecret = plugin.getConfig().getString("mercadopago.webhook.secret", "");
             if (cfgSecret != null && !cfgSecret.trim().isEmpty()) {
                 return cfgSecret.trim();
@@ -782,88 +788,103 @@ public final class AutoPixAPI {
             return false;
         }
 
+        String trimmedRequestId = xRequestId != null ? xRequestId.trim() : "";
+        String reqKey = "wh_" + trimmedPaymentId + "_" + trimmedRequestId;
         String key = (idempotencyKey != null && !idempotencyKey.trim().isEmpty())
                 ? idempotencyKey.trim()
-                : "wh_" + trimmedPaymentId + "_" + xRequestId.trim();
+                : reqKey;
 
-        String eventId = UUID.randomUUID().toString();
-        try (Connection connection = OrderManager.getConnection()) {
-            String checkSql = "SELECT event_id, status FROM autopix_webhook_events WHERE idempotency_key = ?;";
-            try (PreparedStatement checkStmt = connection.prepareStatement(checkSql)) {
-                checkStmt.setString(1, key);
-                try (ResultSet rs = checkStmt.executeQuery()) {
-                    if (rs.next()) {
-                        String existingStatus = rs.getString("status");
-                        if ("PROCESSED".equalsIgnoreCase(existingStatus)) {
-                            return true;
+        Object paymentLock = WEBHOOK_PAYMENT_LOCKS.computeIfAbsent(trimmedPaymentId, k -> new Object());
+        synchronized (paymentLock) {
+            String eventId = UUID.randomUUID().toString();
+            try (Connection connection = OrderManager.getConnection()) {
+                String checkSql = "SELECT event_id, status FROM autopix_webhook_events WHERE idempotency_key = ? OR idempotency_key = ?;";
+                try (PreparedStatement checkStmt = connection.prepareStatement(checkSql)) {
+                    checkStmt.setString(1, key);
+                    checkStmt.setString(2, reqKey);
+                    try (ResultSet rs = checkStmt.executeQuery()) {
+                        String reusableEventId = null;
+                        while (rs.next()) {
+                            String existingStatus = rs.getString("status");
+                            if ("PROCESSED".equalsIgnoreCase(existingStatus)) {
+                                return true;
+                            }
+                            if (reusableEventId == null) {
+                                reusableEventId = rs.getString("event_id");
+                            }
                         }
-                        eventId = rs.getString("event_id");
-                        try (PreparedStatement updateProcessing = connection.prepareStatement(
-                                "UPDATE autopix_webhook_events SET status = 'PROCESSING', last_error = NULL WHERE event_id = ?;")) {
-                            updateProcessing.setString(1, eventId);
-                            updateProcessing.executeUpdate();
-                        }
-                    } else {
-                        String insertSql = "INSERT INTO autopix_webhook_events "
-                                + "(event_id, idempotency_key, topic, payment_id, status, payload, processed_at, created_at) "
-                                + "VALUES (?, ?, ?, ?, 'PROCESSING', ?, NULL, CURRENT_TIMESTAMP);";
-                        try (PreparedStatement insert = connection.prepareStatement(insertSql)) {
-                            insert.setString(1, eventId);
-                            insert.setString(2, key);
-                            insert.setString(3, topic != null ? topic : "payment");
-                            insert.setString(4, trimmedPaymentId);
-                            insert.setString(5, "payment_id=" + trimmedPaymentId);
-                            insert.executeUpdate();
+                        if (reusableEventId != null) {
+                            eventId = reusableEventId;
+                            try (PreparedStatement updateProcessing = connection.prepareStatement(
+                                    "UPDATE autopix_webhook_events SET status = 'PROCESSING', last_error = NULL WHERE event_id = ?;")) {
+                                updateProcessing.setString(1, eventId);
+                                updateProcessing.executeUpdate();
+                            }
+                        } else {
+                            String insertSql = "INSERT INTO autopix_webhook_events "
+                                    + "(event_id, idempotency_key, topic, payment_id, status, payload, processed_at, created_at) "
+                                    + "VALUES (?, ?, ?, ?, 'PROCESSING', ?, NULL, CURRENT_TIMESTAMP);";
+                            try (PreparedStatement insert = connection.prepareStatement(insertSql)) {
+                                insert.setString(1, eventId);
+                                insert.setString(2, key);
+                                insert.setString(3, topic != null ? topic : "payment");
+                                insert.setString(4, trimmedPaymentId);
+                                insert.setString(5, "payment_id=" + trimmedPaymentId
+                                        + ";notification_key=" + key + ";request_id=" + trimmedRequestId);
+                                insert.executeUpdate();
+                            }
                         }
                     }
                 }
-            }
-        } catch (SQLException ex) {
-            AutoPix plugin = AutoPix.getInstance();
-            if (plugin != null) {
-                plugin.getLogger().warning("Erro ao registrar inicio de webhook para pagamento #"
-                        + trimmedPaymentId + ": " + ex.getMessage());
-            }
-            return false;
-        }
-
-        boolean reconciled = false;
-        String errorReason = null;
-        try {
-            reconciled = OrderManager.reconcilePaymentById(AutoPix.getInstance(), trimmedPaymentId);
-            if (!reconciled) {
-                errorReason = "Reconciliacao recusada pelo provedor ou validacao de pagamento.";
-            }
-        } catch (Exception ex) {
-            errorReason = ex.getMessage();
-            reconciled = false;
-        }
-
-        try (Connection connection = OrderManager.getConnection()) {
-            if (reconciled) {
-                String completeSql = "UPDATE autopix_webhook_events "
-                        + "SET status = 'PROCESSED', processed_at = CURRENT_TIMESTAMP, last_error = NULL "
-                        + "WHERE event_id = ?;";
-                try (PreparedStatement stmt = connection.prepareStatement(completeSql)) {
-                    stmt.setString(1, eventId);
-                    stmt.executeUpdate();
-                }
-                return true;
-            } else {
-                String failSql = "DELETE FROM autopix_webhook_events WHERE event_id = ? AND status <> 'PROCESSED';";
-                try (PreparedStatement stmt = connection.prepareStatement(failSql)) {
-                    stmt.setString(1, eventId);
-                    stmt.executeUpdate();
+            } catch (SQLException ex) {
+                AutoPix plugin = AutoPix.getInstance();
+                if (plugin != null) {
+                    plugin.getLogger().warning("Erro ao registrar inicio de webhook para pagamento #"
+                            + trimmedPaymentId + ": " + ex.getMessage());
                 }
                 return false;
             }
-        } catch (SQLException ex) {
-            AutoPix plugin = AutoPix.getInstance();
-            if (plugin != null) {
-                plugin.getLogger().warning("Erro ao finalizar status de webhook para pagamento #"
-                        + trimmedPaymentId + " (" + errorReason + "): " + ex.getMessage());
+
+            boolean reconciled = false;
+            String errorReason = null;
+            try {
+                reconciled = OrderManager.reconcilePaymentById(AutoPix.getInstance(), trimmedPaymentId);
+                if (!reconciled) {
+                    errorReason = "Reconciliacao recusada pelo provedor ou validacao de pagamento.";
+                }
+            } catch (Exception ex) {
+                errorReason = ex.getMessage();
+                reconciled = false;
             }
-            return false;
+
+            try (Connection connection = OrderManager.getConnection()) {
+                if (reconciled) {
+                    String completeSql = "UPDATE autopix_webhook_events "
+                            + "SET status = 'PROCESSED', processed_at = CURRENT_TIMESTAMP, last_error = NULL "
+                            + "WHERE event_id = ?;";
+                    try (PreparedStatement stmt = connection.prepareStatement(completeSql)) {
+                        stmt.setString(1, eventId);
+                        if (stmt.executeUpdate() <= 0) {
+                            return false;
+                        }
+                    }
+                    return true;
+                } else {
+                    String failSql = "DELETE FROM autopix_webhook_events WHERE event_id = ? AND status <> 'PROCESSED';";
+                    try (PreparedStatement stmt = connection.prepareStatement(failSql)) {
+                        stmt.setString(1, eventId);
+                        stmt.executeUpdate();
+                    }
+                    return false;
+                }
+            } catch (SQLException ex) {
+                AutoPix plugin = AutoPix.getInstance();
+                if (plugin != null) {
+                    plugin.getLogger().warning("Erro ao finalizar status de webhook para pagamento #"
+                            + trimmedPaymentId + " (" + errorReason + "): " + ex.getMessage());
+                }
+                return false;
+            }
         }
     }
 

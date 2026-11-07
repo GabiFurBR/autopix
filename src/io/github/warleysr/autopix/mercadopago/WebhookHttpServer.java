@@ -5,15 +5,18 @@ import java.io.OutputStream;
 import java.net.InetSocketAddress;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
+import java.util.Locale;
+import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
-import org.bukkit.Bukkit;
 import org.json.simple.JSONObject;
 import org.json.simple.parser.JSONParser;
 
 import io.github.warleysr.autopix.AutoPix;
+import io.github.warleysr.autopix.OrderManager;
 import io.github.warleysr.autopix.api.AutoPixAPI;
 
 /**
@@ -25,6 +28,38 @@ import io.github.warleysr.autopix.api.AutoPixAPI;
 public final class WebhookHttpServer {
 
     private static volatile HttpServer server;
+    private static volatile ExecutorService executor;
+    private static final AtomicInteger THREAD_COUNTER = new AtomicInteger(0);
+
+    public static final class ParsedWebhookRequest {
+        private final String topic;
+        private final String dataId;
+        private final String notificationId;
+        private final String requestId;
+
+        public ParsedWebhookRequest(String topic, String dataId, String notificationId, String requestId) {
+            this.topic = topic;
+            this.dataId = dataId;
+            this.notificationId = notificationId;
+            this.requestId = requestId;
+        }
+
+        public String getTopic() {
+            return topic;
+        }
+
+        public String getDataId() {
+            return dataId;
+        }
+
+        public String getNotificationId() {
+            return notificationId;
+        }
+
+        public String getRequestId() {
+            return requestId;
+        }
+    }
 
     private WebhookHttpServer() {
     }
@@ -43,41 +78,158 @@ public final class WebhookHttpServer {
         String bindHost = plugin.getConfig().getString("automatico.webhook.bind", "127.0.0.1").trim();
         int port = plugin.getConfig().getInt("automatico.webhook.porta", 8090);
         String path = plugin.getConfig().getString("automatico.webhook.path", "/autopix/webhook/mercadopago").trim();
-        if (!path.startsWith("/")) {
-            path = "/" + path;
+        startEndpoint(plugin, bindHost, port, path);
+    }
+
+    public static synchronized boolean startEndpoint(AutoPix plugin, String bindHost, int port, String path) {
+        stop();
+        String normalizedHost = (bindHost != null && !bindHost.trim().isEmpty()) ? bindHost.trim() : "127.0.0.1";
+        String normalizedPath = (path != null && !path.trim().isEmpty()) ? path.trim() : "/autopix/webhook/mercadopago";
+        if (!normalizedPath.startsWith("/")) {
+            normalizedPath = "/" + normalizedPath;
         }
 
         try {
-            HttpServer candidate = HttpServer.create(new InetSocketAddress(bindHost, port), 16);
-            candidate.setExecutor(Executors.newSingleThreadExecutor(r -> {
-                Thread t = new Thread(r, "AutoPix-Webhook-HTTP");
+            HttpServer candidate = HttpServer.create(new InetSocketAddress(normalizedHost, port), 32);
+            ExecutorService pool = Executors.newFixedThreadPool(4, r -> {
+                Thread t = new Thread(r, "AutoPix-Webhook-HTTP-" + THREAD_COUNTER.incrementAndGet());
                 t.setDaemon(true);
                 return t;
-            }));
-            candidate.createContext(path, exchange -> handleRequest(plugin, exchange));
+            });
+            candidate.setExecutor(pool);
+            candidate.createContext(normalizedPath, exchange -> handleRequest(plugin, exchange));
             candidate.start();
             server = candidate;
-            plugin.getLogger().info("Receptor HTTP de Webhooks ativo em " + bindHost + ":" + port + path);
+            executor = pool;
+            if (plugin != null && plugin.getLogger() != null) {
+                plugin.getLogger().info("Receptor HTTP de Webhooks ativo em "
+                        + normalizedHost + ":" + candidate.getAddress().getPort() + normalizedPath);
+            }
+            return true;
         } catch (Exception ex) {
-            plugin.getLogger().severe("Falha ao iniciar receptor HTTP de Webhooks: " + ex.getMessage());
+            if (plugin != null && plugin.getLogger() != null) {
+                plugin.getLogger().severe("Falha ao iniciar receptor HTTP de Webhooks: " + ex.getMessage());
+            }
+            return false;
         }
+    }
+
+    public static int getBoundPort() {
+        HttpServer current = server;
+        return current != null && current.getAddress() != null ? current.getAddress().getPort() : -1;
     }
 
     public static synchronized void stop() {
         HttpServer current = server;
+        ExecutorService currentPool = executor;
         server = null;
+        executor = null;
         if (current != null) {
             try {
                 current.stop(0);
             } catch (Exception ignored) {
             }
         }
+        if (currentPool != null) {
+            try {
+                currentPool.shutdownNow();
+            } catch (Exception ignored) {
+            }
+        }
+    }
+
+    public static ParsedWebhookRequest parseWebhookRequest(URI uri, String body, String xRequestId) {
+        String topic = "payment";
+        String queryDataId = null;
+        String queryNotifId = null;
+        String jsonDataId = null;
+        String jsonNotifId = null;
+
+        if (uri != null && uri.getQuery() != null) {
+            for (String param : uri.getQuery().split("&")) {
+                String[] kv = param.split("=", 2);
+                if (kv.length == 2) {
+                    String key = kv[0].trim();
+                    String val = kv[1].trim();
+                    if ("data.id".equalsIgnoreCase(key)) {
+                        queryDataId = val;
+                    } else if ("id".equalsIgnoreCase(key) || "notification_id".equalsIgnoreCase(key)) {
+                        queryNotifId = val;
+                    } else if ("type".equalsIgnoreCase(key) || "topic".equalsIgnoreCase(key)) {
+                        if (!val.isEmpty()) {
+                            topic = val;
+                        }
+                    }
+                }
+            }
+        }
+
+        if (body != null && !body.trim().isEmpty()) {
+            try {
+                JSONObject json = (JSONObject) new JSONParser().parse(body);
+                if (json.get("type") != null) {
+                    topic = String.valueOf(json.get("type")).trim();
+                } else if (json.get("topic") != null) {
+                    topic = String.valueOf(json.get("topic")).trim();
+                } else if (json.get("action") != null) {
+                    topic = String.valueOf(json.get("action")).trim();
+                }
+                if (json.get("id") != null) {
+                    String candidateNotif = String.valueOf(json.get("id")).trim();
+                    if (!candidateNotif.isEmpty()) {
+                        jsonNotifId = candidateNotif;
+                    }
+                }
+                Object dataObj = json.get("data");
+                if (dataObj instanceof JSONObject) {
+                    Object idObj = ((JSONObject) dataObj).get("id");
+                    if (idObj != null) {
+                        String candidateDataId = String.valueOf(idObj).trim();
+                        if (!candidateDataId.isEmpty()) {
+                            jsonDataId = candidateDataId;
+                        }
+                    }
+                }
+            } catch (Exception ignored) {
+            }
+        }
+
+        String resolvedDataId = jsonDataId != null ? jsonDataId : (queryDataId != null ? queryDataId : queryNotifId);
+        String resolvedNotificationId = jsonNotifId != null
+                ? jsonNotifId
+                : (queryNotifId != null && (jsonDataId != null || queryDataId != null) ? queryNotifId : null);
+        String normalizedRequestId = xRequestId != null && !xRequestId.trim().isEmpty() ? xRequestId.trim() : null;
+
+        return new ParsedWebhookRequest(topic, resolvedDataId, resolvedNotificationId, normalizedRequestId);
+    }
+
+    private static String resolveWebhookSecret(AutoPix plugin) {
+        String apiSecret = AutoPixAPI.getConfiguredWebhookSecret();
+        if (apiSecret != null && !apiSecret.trim().isEmpty()) {
+            return apiSecret.trim();
+        }
+        if (plugin != null && plugin.getConfig() != null) {
+            String autoSecret = plugin.getConfig().getString("automatico.webhook.secret", "");
+            if (autoSecret != null && !autoSecret.trim().isEmpty()) {
+                return autoSecret.trim();
+            }
+            String mpSecret = plugin.getConfig().getString("mercadopago.webhook.secret", "");
+            if (mpSecret != null && !mpSecret.trim().isEmpty()) {
+                return mpSecret.trim();
+            }
+        }
+        return null;
     }
 
     private static void handleRequest(AutoPix plugin, HttpExchange exchange) {
         try {
             if (!"POST".equalsIgnoreCase(exchange.getRequestMethod())) {
                 sendResponse(exchange, 405, "{\"error\":\"method_not_allowed\"}");
+                return;
+            }
+
+            if (!OrderManager.isDatabaseReady() || OrderManager.isShuttingDown()) {
+                sendResponse(exchange, 503, "{\"error\":\"service_unavailable\"}");
                 return;
             }
 
@@ -90,63 +242,55 @@ public final class WebhookHttpServer {
                 body = new String(bytes, StandardCharsets.UTF_8);
             }
 
-            String topic = "payment";
-            String dataId = null;
+            ParsedWebhookRequest parsed = parseWebhookRequest(exchange.getRequestURI(), body, xRequestId);
+            String topic = parsed.getTopic();
+            String dataId = parsed.getDataId();
+            String notificationId = parsed.getNotificationId();
 
-            URI uri = exchange.getRequestURI();
-            if (uri != null && uri.getQuery() != null) {
-                for (String param : uri.getQuery().split("&")) {
-                    String[] kv = param.split("=", 2);
-                    if (kv.length == 2) {
-                        if ("data.id".equalsIgnoreCase(kv[0]) || "id".equalsIgnoreCase(kv[0])) {
-                            dataId = kv[1].trim();
-                        } else if ("type".equalsIgnoreCase(kv[0]) || "topic".equalsIgnoreCase(kv[0])) {
-                            topic = kv[1].trim();
-                        }
-                    }
-                }
+            if (dataId == null || dataId.isEmpty()) {
+                sendResponse(exchange, 400, "{\"error\":\"missing_data_id\"}");
+                return;
             }
 
-            if (body != null && !body.trim().isEmpty()) {
-                try {
-                    JSONObject json = (JSONObject) new JSONParser().parse(body);
-                    if (json.get("type") != null) {
-                        topic = String.valueOf(json.get("type"));
-                    } else if (json.get("topic") != null) {
-                        topic = String.valueOf(json.get("topic"));
-                    }
-                    Object dataObj = json.get("data");
-                    if (dataObj instanceof JSONObject) {
-                        Object idObj = ((JSONObject) dataObj).get("id");
-                        if (idObj != null) {
-                            dataId = String.valueOf(idObj);
-                        }
-                    }
-                } catch (Exception ignored) {
+            String secret = resolveWebhookSecret(plugin);
+            if (secret == null || secret.isEmpty()) {
+                if (plugin != null && plugin.getLogger() != null) {
+                    plugin.getLogger().warning("Webhook rejeitado: segredo de webhook nao configurado.");
                 }
+                sendResponse(exchange, 503, "{\"error\":\"webhook_secret_not_configured\"}");
+                return;
             }
 
-            String secret = plugin.getConfig().getString("automatico.webhook.secret", "").trim();
-            if (!WebhookValidator.validateSignature(xSignature, xRequestId, dataId, secret)) {
-                plugin.getLogger().warning("Webhook rejeitado: assinatura criptografica invalida ou ausente.");
+            if (!WebhookValidator.validateSignature(xSignature, parsed.getRequestId(), dataId, secret)) {
+                if (plugin != null && plugin.getLogger() != null) {
+                    plugin.getLogger().warning("Webhook rejeitado: assinatura criptografica invalida, expirada ou ausente.");
+                }
                 sendResponse(exchange, 401, "{\"error\":\"invalid_signature\"}");
                 return;
             }
 
-            final String finalTopic = topic;
-            final String finalDataId = dataId;
-            final String finalRequestId = xRequestId;
-
-            if (Bukkit.getServer() != null && plugin.isEnabled()) {
-                Bukkit.getScheduler().runTaskAsynchronously(plugin, () ->
-                        AutoPixAPI.processWebhookNotification(
-                                finalTopic, finalDataId, finalRequestId, xSignature, finalRequestId, secret));
-            } else {
-                AutoPixAPI.processWebhookNotification(
-                        finalTopic, finalDataId, finalRequestId, xSignature, finalRequestId, secret);
+            if (topic != null && !topic.trim().isEmpty()) {
+                String normalizedTopic = topic.trim().toLowerCase(Locale.ROOT);
+                if (!normalizedTopic.equals("payment")
+                        && !normalizedTopic.equals("payment.updated")
+                        && !normalizedTopic.equals("payment.created")) {
+                    sendResponse(exchange, 200, "{\"status\":\"ignored_topic\"}");
+                    return;
+                }
             }
 
-            sendResponse(exchange, 200, "{\"status\":\"accepted\"}");
+            String effectiveIdempotencyKey = (notificationId != null && !notificationId.isEmpty())
+                    ? "mp_notif_" + notificationId
+                    : null;
+
+            boolean processed = AutoPixAPI.processWebhookNotification(
+                    topic, dataId, effectiveIdempotencyKey, xSignature, parsed.getRequestId(), secret);
+
+            if (processed) {
+                sendResponse(exchange, 200, "{\"status\":\"processed\"}");
+            } else {
+                sendResponse(exchange, 500, "{\"error\":\"processing_failed\"}");
+            }
         } catch (Exception ex) {
             try {
                 sendResponse(exchange, 500, "{\"error\":\"internal_error\"}");

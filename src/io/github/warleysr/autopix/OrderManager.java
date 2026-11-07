@@ -1161,7 +1161,17 @@ public class OrderManager {
                     || trimmedRef.equalsIgnoreCase("order:" + expectedId)
                     || trimmedRef.equalsIgnoreCase("order_" + expectedId)
                     || trimmedRef.equalsIgnoreCase("autopix:" + expectedId)
-                    || trimmedRef.equalsIgnoreCase(order.getProduct());
+                    || trimmedRef.equalsIgnoreCase(order.getProduct())
+                    || (order.getPlayer() != null && trimmedRef.equalsIgnoreCase(order.getPlayer()))
+                    || (order.getIdempotencyKey() != null && trimmedRef.equalsIgnoreCase(order.getIdempotencyKey()));
+            if (!validRef) {
+                io.github.warleysr.autopix.subscription.SubscriptionInvoice linkedInv =
+                        SubscriptionManager.getInvoiceByOrderId(order.getId());
+                if (linkedInv != null) {
+                    validRef = trimmedRef.equalsIgnoreCase(linkedInv.getSubscriptionId())
+                            || trimmedRef.equalsIgnoreCase(linkedInv.getInvoiceId());
+                }
+            }
             if (!validRef) {
                 if (ap != null) {
                     ap.getLogger().warning("Pagamento #" + pd.getPaymentId()

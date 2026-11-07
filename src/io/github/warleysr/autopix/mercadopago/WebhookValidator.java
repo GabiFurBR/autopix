@@ -21,7 +21,7 @@ public final class WebhookValidator {
     }
 
     public static boolean validateSignature(String xSignature, String xRequestId, String dataId, String secret) {
-        return validateSignature(xSignature, xRequestId, dataId, secret, 0L);
+        return validateSignature(xSignature, xRequestId, dataId, secret, DEFAULT_MAX_SKEW_SECONDS);
     }
 
     public static boolean validateSignature(String xSignature, String xRequestId, String dataId,
@@ -60,11 +60,10 @@ public final class WebhookValidator {
             return false;
         }
 
-        if (maxSkewSeconds > 0L) {
-            long nowSeconds = System.currentTimeMillis() / 1000L;
-            if (Math.abs(nowSeconds - timestampSeconds) > maxSkewSeconds) {
-                return false;
-            }
+        long effectiveSkew = maxSkewSeconds > 0L ? maxSkewSeconds : DEFAULT_MAX_SKEW_SECONDS;
+        long nowSeconds = System.currentTimeMillis() / 1000L;
+        if (Math.abs(nowSeconds - timestampSeconds) > effectiveSkew) {
+            return false;
         }
 
         String manifest = buildManifest(dataId, xRequestId, ts);
