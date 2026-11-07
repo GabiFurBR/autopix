@@ -690,9 +690,12 @@ public final class SubscriptionManager {
             boolean reconciled = onOrderPaymentApproved(
                     orderId, invoice.getProviderPaymentId(), order.getTransaction(), order.getTotal());
             if (!reconciled) {
-                logError("Nao foi possivel reconciliar automaticamente a fatura "
-                        + invoice.getInvoiceId() + " da assinatura " + invoice.getSubscriptionId()
-                        + " apesar do pedido #" + orderId + " estar pago.", null);
+                AutoPix plugin = AutoPix.getInstance();
+                if (plugin != null) {
+                    plugin.getLogger().warning("Nao foi possivel reconciliar automaticamente a fatura "
+                            + invoice.getInvoiceId() + " da assinatura " + invoice.getSubscriptionId()
+                            + " apesar do pedido #" + orderId + " estar pago.");
+                }
             }
         }
     }
