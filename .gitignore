@@ -9,10 +9,10 @@
 .project
 .settings/
 
-# Local secrets and generated configs
+# Local secrets, archives and generated configs
 .env
 .env.*
 !.env.example
 config-local.yml
 config-private.yml
-
+*.zip

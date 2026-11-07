@@ -2,9 +2,9 @@ name: Build AutoPix
 
 on:
   push:
-    branches: [master, develop]
+    branches: [master, develop, fix/neo-rankup-hardening, 'fix/**']
   pull_request:
-    branches: [master, develop, fix/reliability-audit]
+    branches: [master, develop, fix/reliability-audit, fix/neo-rankup-hardening]
   workflow_dispatch:
 
 permissions:
@@ -22,8 +22,8 @@ jobs:
           distribution: temurin
           java-version: '25'
           cache: maven
-      - name: Build shaded plugin
-        run: mvn --batch-mode --no-transfer-progress clean package
+      - name: Build and verify shaded plugin
+        run: mvn --batch-mode --no-transfer-progress clean verify
       - name: Upload plugin JAR
         uses: actions/upload-artifact@v4
         with:
