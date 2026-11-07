@@ -2,6 +2,7 @@ package io.github.warleysr.autopix.subscription;
 
 import java.math.BigDecimal;
 import java.math.RoundingMode;
+import java.nio.charset.StandardCharsets;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
@@ -295,6 +296,19 @@ public final class SubscriptionManager {
                         || existingOrder.getStatus() == OrderStatus.EXPIRED
                         || existingOrder.getStatus() == OrderStatus.FAILED;
                 if (!terminalOrder) {
+                    if (existingOrder.isValidated()) {
+                        boolean reconciled = onOrderPaymentApproved(
+                                existingOrder.getId(), openPendingInvoice.getProviderPaymentId(),
+                                existingOrder.getTransaction(), existingOrder.getTotal());
+                        if (!reconciled) {
+                            return SubscriptionResult.failure("O pedido desta fatura ja esta pago, mas a assinatura nao foi reconciliada. Nenhuma nova cobranca foi criada; requer verificacao administrativa.");
+                        }
+                        Subscription updatedSub = getSubscription(normSubId);
+                        SubscriptionInvoice updatedInvoice = getInvoice(openPendingInvoice.getInvoiceId());
+                        return SubscriptionResult.success(updatedSub, updatedInvoice, null, null,
+                                "Pagamento ja aprovado; assinatura reconciliada com sucesso.");
+                    }
+
                     Payment existingPayment = OrderManager.getPaymentByOrderId(openPendingInvoice.getOrderId());
                     if (existingPayment == null) {
                         PixData existingPixData = OrderManager.getPixData(existingOrder);
@@ -331,8 +345,16 @@ public final class SubscriptionManager {
             String retryToken = retrySeed != null && !retrySeed.trim().isEmpty()
                     ? retrySeed.trim().replaceAll("[^A-Za-z0-9_-]", "_")
                     : (reusableFailedInvoiceId != null ? reusableFailedInvoiceId : "initial");
-            String idempotencyKey = "sub_charge_" + normSubId + "_cycle_" + nextCycle
-                    + (reusableFailedInvoiceId != null ? "_retry_" + retryToken : "");
+            String idempotencyKey;
+            if (reusableFailedInvoiceId == null) {
+                idempotencyKey = "sub_charge_" + normSubId + "_cycle_" + nextCycle;
+            } else {
+                String retryMaterial = normSubId + "|" + nextCycle + "|" + retryToken;
+                String retryHash = UUID.nameUUIDFromBytes(retryMaterial.getBytes(StandardCharsets.UTF_8))
+                        .toString().replace("-", "");
+                // Keep Mercado Pago's provider idempotency key compact and deterministic (37 chars).
+                idempotencyKey = "subr_" + retryHash;
+            }
 
             PixData pixData = createProviderOrLocalCharge(playerName, summary, amount, normSubId, idempotencyKey);
             if (pixData == null) {
@@ -448,7 +470,7 @@ public final class SubscriptionManager {
                                 order.getTransaction(), order.getTotal());
                         Subscription updated = getSubscription(normSubId);
                         SubscriptionInvoice updatedInvoice = getInvoice(inv.getInvoiceId());
-                        return SubscriptionResult.success(updated, updatedInvoice, order, payment,
+                        return SubscriptionResult.success(updated, updatedInvoice, null, null,
                                 "Pagamento inicial ja aprovado; estado da assinatura reconciliado.");
                     }
                     if (order != null && payment == null) {
